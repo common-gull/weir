@@ -113,6 +113,10 @@ dist
 # TernJS port file
 .tern-port
 
+# Python bytecode (step runtime shim loads user .py modules)
+__pycache__/
+*.pyc
+
 # --- weir ---
 *.db
 *.db-wal
