@@ -68,9 +68,14 @@ export function createServer(deps: ServerDeps) {
             const counts = db
                 .query(`SELECT status, COUNT(*) AS c FROM runs WHERE workflow = ? GROUP BY status`)
                 .all(wf.name) as { status: string; c: number }[];
+            // Paused iff a schedule row exists with enabled = 0; false when there's no schedule.
+            const sched = db.query(`SELECT enabled FROM schedules WHERE workflow = ?`).get(wf.name) as
+                | { enabled: number }
+                | undefined;
             return {
                 name: wf.name,
                 schedule: wf.opts.schedule ?? null,
+                schedulePaused: sched?.enabled === 0,
                 capabilities: wf.opts.capabilities ?? [],
                 priority: wf.opts.priority ?? 0,
                 lastRun: last ?? null,
@@ -229,6 +234,16 @@ export function createServer(deps: ServerDeps) {
         executor.wake();
         return json({ id });
     });
+
+    // Pause / resume a workflow's schedule — hold or release future scheduled fires only (manual
+    // runs and in-flight runs are untouched). `ok` is false when there was no matching schedule to
+    // toggle. Absent a scheduler (read-only API mode) there's nothing to pause, so report false.
+    on('POST', /^\/api\/workflows\/([^/]+)\/pause$/, (_req, m) =>
+        json({ ok: scheduler?.pauseWorkflow(seg(m)) ?? false }),
+    );
+    on('POST', /^\/api\/workflows\/([^/]+)\/resume$/, (_req, m) =>
+        json({ ok: scheduler?.resumeWorkflow(seg(m)) ?? false }),
+    );
 
     on('POST', /^\/api\/runs\/([^/]+)\/retry$/, async (req, m) => {
         const body = (await req.json().catch(() => ({}))) as { from?: string };
