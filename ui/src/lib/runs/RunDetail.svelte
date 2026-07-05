@@ -108,14 +108,14 @@
   <div class="subtle">{run.id} · attempt {run.attempt} · {fmtTime(run.created_at)} → {fmtTime(run.finished_at)}</div>
 
   <div class="actions">
-    <button class="btn" onclick={() => act(() => api.retry(id))}>↻ Retry</button>
+    <button type="button" class="btn" onclick={() => act(() => api.retry(id))}>↻ Retry</button>
     {#if run.status === 'running' || run.status === 'queued'}
-      <button class="btn" onclick={() => act(() => api.cancel(id))}>✕ Cancel</button>
+      <button type="button" class="btn" onclick={() => act(() => api.cancel(id))}>✕ Cancel</button>
     {/if}
     {#if run.status === 'awaiting-approval'}
-      <button class="btn" onclick={() => act(() => api.approve(id))}>✓ Approve</button>
+      <button type="button" class="btn" onclick={() => act(() => api.approve(id))}>✓ Approve</button>
     {/if}
-    <button class="btn" onclick={() => api.runWorkflow(run.workflow).then((r) => goto(`/runs/${encodeURIComponent(r.id)}`))}>▶ Run again</button>
+    <button type="button" class="btn" onclick={() => api.runWorkflow(run.workflow).then((r) => goto(`/runs/${encodeURIComponent(r.id)}`))}>▶ Run again</button>
   </div>
 
   {#if run.input && run.input !== 'null'}
@@ -137,7 +137,7 @@
           <div class="k">{s.key} <span class="kind">· {s.kind}</span></div>
           {#if s.result && s.kind === 'step'}<pre>{pretty(s.result)}</pre>{/if}
         </div>
-        <button class="btn sm retrybtn" onclick={() => act(() => api.retry(id, s.name))}>↻ from here</button>
+        <button type="button" class="btn sm retrybtn" onclick={() => act(() => api.retry(id, s.name))}>↻ from here</button>
       </div>
     {:else}
       <div class="empty">no steps recorded yet</div>
@@ -158,14 +158,14 @@
   <div class="section-title" style="padding-left:0">Live log</div>
   <div class="logs" bind:this={logEl}>
     {#if hasOlder}
-      <button class="btn sm loadmore" onclick={loadOlder} disabled={loadingOlder}>
+      <button type="button" class="btn sm loadmore" onclick={loadOlder} disabled={loadingOlder}>
         {loadingOlder ? 'loading…' : '↑ load earlier events'}
       </button>
     {/if}
     {#each events as e (e.id)}
-      <div class="line {e.level ? 'lvl-' + e.level : ''}">
+      <div class="line {e.level ? `lvl-${e.level}` : ''}">
         <span class="ts">{fmtTime(e.ts)}</span>
-        {e.type === 'run.log' && e.message ? e.message : e.type + (e.message ? ' — ' + e.message : '')}
+        {e.type === 'run.log' && e.message ? e.message : `${e.type}${e.message ? ` — ${e.message}` : ''}`}
       </div>
     {:else}
       <div class="subtle">waiting for events…</div>

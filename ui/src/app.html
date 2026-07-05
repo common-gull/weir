@@ -8,16 +8,16 @@
       // Stamp the theme before first paint so there's no light→dark flash. A saved choice wins;
       // otherwise follow the OS. The theme toggle in the layout updates the same attribute + key.
       // Storage access can throw in locked-down webviews/privacy modes — never let that block render.
-      (function () {
+      (() => {
         try {
-          var saved = localStorage.getItem('weir-theme');
+          const saved = localStorage.getItem('weir-theme');
           document.documentElement.dataset.theme =
             saved === 'light' || saved === 'dark'
               ? saved
               : matchMedia('(prefers-color-scheme: dark)').matches
                 ? 'dark'
                 : 'light';
-        } catch (e) {
+        } catch {
           document.documentElement.dataset.theme = 'light';
         }
       })();

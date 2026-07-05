@@ -5,4 +5,6 @@
   const id = $derived(page.params.id);
 </script>
 
-<RunDetail {id} />
+{#if id}
+  <RunDetail {id} />
+{/if}

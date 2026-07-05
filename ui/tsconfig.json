@@ -3,6 +3,9 @@
   "compilerOptions": {
     "strict": true,
     "verbatimModuleSyntax": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    // Scope ambient types to the UI; without this the repo-root @types/bun leaks in and
+    // collides with SvelteKit/Vite's import.meta globals.
+    "types": []
   }
 }

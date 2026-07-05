@@ -26,7 +26,7 @@
       try {
         input = JSON.parse(raw);
       } catch (e) {
-        error = 'Invalid JSON — ' + (e as Error).message;
+        error = `Invalid JSON — ${(e as Error).message}`;
         return;
       }
     }
@@ -36,7 +36,7 @@
       // The run id only exists after this POST returns, so navigate programmatically.
       goto(`/runs/${encodeURIComponent(id)}`);
     } catch (e) {
-      error = 'Failed to start — ' + (e as Error).message;
+      error = `Failed to start — ${(e as Error).message}`;
     } finally {
       starting = false;
     }
@@ -80,7 +80,7 @@
   ></textarea>
   {#if error}<div class="input-error">{error}</div>{/if}
   <div class="actions">
-    <button class="btn primary" onclick={start} disabled={starting}>
+    <button type="button" class="btn primary" onclick={start} disabled={starting}>
       ▶ {starting ? 'Starting…' : 'Start run'}
     </button>
   </div>

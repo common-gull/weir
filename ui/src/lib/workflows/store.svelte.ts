@@ -7,5 +7,5 @@ import type { WorkflowSummary } from '$lib/workflows/types';
 export const workflows = $state<{ list: WorkflowSummary[] }>({ list: [] });
 
 export async function loadWorkflows(): Promise<void> {
-  workflows.list = await api.workflows();
+    workflows.list = await api.workflows();
 }
