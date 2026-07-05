@@ -411,6 +411,10 @@ function buildCtx(
                     index: i,
                     prev,
                     step: (name, fn, o) => stepImpl(name, fn, o, `${base}:${i}:${name}`),
+                    runUnsafelyOnHost: (name, fn, o) => {
+                        requireCapability('host-exec');
+                        return stepImpl(name, fn, o, `${base}:${i}:${name}`);
+                    },
                 };
                 result = await Promise.resolve(bodyFn(it));
                 prev = result;

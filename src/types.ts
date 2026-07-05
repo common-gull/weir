@@ -122,6 +122,9 @@ export interface LoopCtx {
     readonly index: number;
     readonly prev: unknown; // previous iteration's return value (undefined on first)
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
+    /** Loop-scoped counterpart to `Ctx.runUnsafelyOnHost`: same per-iteration namespacing as
+     *  `step`, but runs on the host with full daemon privileges. Gated on 'host-exec'. */
+    runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
 }
 
 export class SkipSignal {
