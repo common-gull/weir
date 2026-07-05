@@ -38,6 +38,8 @@ export const api = {
     },
     reload: () => post<{ workflows: number; files: number; removed: string[] }>('/reload'),
     runWorkflow: (name: string, input?: unknown) => post<{ id: string }>(`/workflows/${name}/run`, input),
+    pauseWorkflow: (name: string) => post(`/workflows/${name}/pause`),
+    resumeWorkflow: (name: string) => post(`/workflows/${name}/resume`),
     retry: (id: string, from?: string) => post(`/runs/${id}/retry`, { from }),
     cancel: (id: string) => post(`/runs/${id}/cancel`),
     approve: (id: string, gate = 'human') => post(`/runs/${id}/approve`, { gate }),

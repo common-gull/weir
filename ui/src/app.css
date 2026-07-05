@@ -161,6 +161,7 @@ body::before {
 @keyframes pulse { 50% { opacity: 0.35; } }
 
 .badge { font-size: 10.5px; padding: 1px 9px; border-radius: var(--radius-sm); border: 1.5px solid var(--line); background: var(--card); font-family: var(--mono); }
+.badge.paused { color: var(--wait); border-color: var(--wait); }
 
 .head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
 .head h1 { font-family: var(--serif); font-size: 24px; font-weight: 700; margin: 0; letter-spacing: 0.2px; }

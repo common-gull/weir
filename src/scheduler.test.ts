@@ -174,6 +174,72 @@ test('a transiently-invalid cron on reload keeps the existing row instead of del
     expect((db.query(`SELECT enabled FROM schedules WHERE id = 'wf:w'`).get() as { enabled: number }).enabled).toBe(0);
 });
 
+test('pause stops scheduled firing; resume restores it (catchup skip drops the backlog)', () => {
+    let clock = T0;
+    defineWorkflow('w', { schedule: { cron: '* * * * *' } }, async () => 1);
+    const s = new Scheduler(db, undefined, () => clock);
+    s.syncFromRegistry();
+
+    expect(s.pauseWorkflow('w')).toBe(true);
+    expect((db.query(`SELECT enabled FROM schedules WHERE id = 'wf:w'`).get() as { enabled: number }).enabled).toBe(0);
+
+    // Paused across several slots: the tick loop skips enabled=0 rows, so nothing fires and
+    // next_fire_at never advances.
+    clock = Date.UTC(2026, 0, 1, 0, 5, 30);
+    expect(s.tick()).toBe(0);
+    expect(runCount('w')).toBe(0);
+    const paused = db.query(`SELECT next_fire_at FROM schedules WHERE id = 'wf:w'`).get() as { next_fire_at: number };
+    expect(paused.next_fire_at).toBe(Date.UTC(2026, 0, 1, 0, 1, 0));
+
+    // Resume: the default catchup 'skip' drops the missed backlog on the next tick (no runs),
+    // then firing resumes at the next on-time slot.
+    expect(s.resumeWorkflow('w')).toBe(true);
+    expect(s.tick()).toBe(0);
+    expect(runCount('w')).toBe(0);
+    clock = Date.UTC(2026, 0, 1, 0, 6, 5);
+    expect(s.tick()).toBe(1);
+    expect(runCount('w')).toBe(1);
+});
+
+test('pause/resume are idempotent and emit schedule.paused / schedule.resumed only on change', () => {
+    const clock = T0;
+    defineWorkflow('w', { schedule: { cron: '* * * * *' } }, async () => 1);
+    const s = new Scheduler(db, undefined, () => clock);
+    s.syncFromRegistry();
+
+    expect(s.pauseWorkflow('w')).toBe(true);
+    expect(s.pauseWorkflow('w')).toBe(false); // already paused — no-op
+    expect(s.resumeWorkflow('w')).toBe(true);
+    expect(s.resumeWorkflow('w')).toBe(false); // already running — no-op
+
+    const types = (
+        db.query(`SELECT type FROM events WHERE type LIKE 'schedule.%' ORDER BY id`).all() as {
+            type: string;
+        }[]
+    ).map((e) => e.type);
+    expect(types.filter((t) => t === 'schedule.paused')).toHaveLength(1);
+    expect(types.filter((t) => t === 'schedule.resumed')).toHaveLength(1);
+});
+
+test('manual runs still work while the schedule is paused', () => {
+    const clock = T0;
+    defineWorkflow('w', { schedule: { cron: '* * * * *' } }, async () => 1);
+    const s = new Scheduler(db, undefined, () => clock);
+    s.syncFromRegistry();
+    s.pauseWorkflow('w');
+    createRun(db, 'w'); // the Start run / `weir run` path bypasses the scheduler entirely
+    expect(runCount('w')).toBe(1);
+});
+
+test('pausing a workflow with no schedule row is a no-op returning false', () => {
+    const clock = T0;
+    defineWorkflow('manual', {}, async () => 1);
+    const s = new Scheduler(db, undefined, () => clock);
+    s.syncFromRegistry();
+    expect(s.pauseWorkflow('manual')).toBe(false);
+    expect(s.resumeWorkflow('manual')).toBe(false);
+});
+
 test('no drift: next_fire_at stays aligned to the cron grid', () => {
     let clock = T0;
     defineWorkflow('w', { schedule: { cron: '*/5 * * * *' } }, async () => 1);

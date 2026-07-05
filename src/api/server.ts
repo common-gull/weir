@@ -68,9 +68,16 @@ export function createServer(deps: ServerDeps) {
             const counts = db
                 .query(`SELECT status, COUNT(*) AS c FROM runs WHERE workflow = ? GROUP BY status`)
                 .all(wf.name) as { status: string; c: number }[];
+            // A scheduled workflow whose row is `enabled = 0` is paused (see Scheduler.pauseWorkflow).
+            const sched = wf.opts.schedule
+                ? (db.query(`SELECT enabled FROM schedules WHERE id = ?`).get(`wf:${wf.name}`) as {
+                      enabled: number;
+                  } | null)
+                : null;
             return {
                 name: wf.name,
                 schedule: wf.opts.schedule ?? null,
+                schedulePaused: sched ? sched.enabled === 0 : false,
                 capabilities: wf.opts.capabilities ?? [],
                 priority: wf.opts.priority ?? 0,
                 lastRun: last ?? null,
@@ -228,6 +235,20 @@ export function createServer(deps: ServerDeps) {
         const id = createRun(db, name, input);
         executor.wake();
         return json({ id });
+    });
+
+    // Pause / resume a workflow's cron schedule. Only affects scheduled firing — Start run above and
+    // `weir run` are unaffected. The Scheduler owns the enabled flag, so both need it wired up.
+    on('POST', /^\/api\/workflows\/([^/]+)\/pause$/, (_req, m) => {
+        if (!scheduler) return json({ error: 'scheduler unavailable' }, 503);
+        scheduler.pauseWorkflow(seg(m));
+        return json({ ok: true });
+    });
+
+    on('POST', /^\/api\/workflows\/([^/]+)\/resume$/, (_req, m) => {
+        if (!scheduler) return json({ error: 'scheduler unavailable' }, 503);
+        scheduler.resumeWorkflow(seg(m));
+        return json({ ok: true });
     });
 
     on('POST', /^\/api\/runs\/([^/]+)\/retry$/, async (req, m) => {

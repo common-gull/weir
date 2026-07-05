@@ -134,6 +134,34 @@ export class Scheduler {
         if (this.timer) clearInterval(this.timer);
     }
 
+    /**
+     * Pause a workflow's schedule: the tick loop only selects `enabled = 1` rows, so flipping the
+     * flag stops scheduled firing while leaving `next_fire_at`/`last_fire_at` intact. Manual runs
+     * (`weir run`, the UI's Start run) don't go through the scheduler and keep working. Returns
+     * whether the flag actually changed — false if already paused or there's no schedule row.
+     */
+    pauseWorkflow(name: string): boolean {
+        return this.setScheduleEnabled(name, false);
+    }
+
+    /**
+     * Resume a paused schedule. `next_fire_at` was left where it was, so the next tick applies the
+     * workflow's catch-up policy to any slots missed while paused (default `skip`: advance past now
+     * without a backlog).
+     */
+    resumeWorkflow(name: string): boolean {
+        return this.setScheduleEnabled(name, true);
+    }
+
+    private setScheduleEnabled(name: string, on: boolean): boolean {
+        const res = this.db
+            .query(`UPDATE schedules SET enabled = ? WHERE id = ? AND enabled = ?`)
+            .run(on ? 1 : 0, `wf:${name}`, on ? 0 : 1);
+        if ((res.changes as number) === 0) return false;
+        emit(this.db, { type: on ? 'schedule.resumed' : 'schedule.paused', message: name });
+        return true;
+    }
+
     /** Evaluate all due schedules once. Returns the number of runs created. */
     tick(): number {
         const now = this.now();
