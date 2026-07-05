@@ -3,25 +3,33 @@
 Reimplements the C1 wire protocol (src/exec/protocol.ts) in Python: a python step can't import the
 TypeScript module, so the protocol — not shared code — is the contract.
 
-stdout carries exactly one output frame, so user `print()` is redirected to the stderr log channel
-before the module loads; otherwise a stray print would corrupt the frame.
+stdout carries exactly one output frame, so everything the step writes to stdout is redirected to the
+stderr log channel before the module loads; otherwise a stray write would corrupt the frame.
 """
 
 import importlib.util
 import json
+import os
 import sys
 
 sys.dont_write_bytecode = True  # don't drop __pycache__ next to the user's module on the host
-_real_stdout = sys.stdout
-sys.stdout = sys.stderr  # user prints must not land on the output-frame stream (fd 1)
+
+# Redirect OS-level fd 1 onto fd 2 so anything that writes to stdout — print(), os.write(1, ...), a C
+# extension, or a child process that inherits stdio — lands on the stderr log channel, never on the
+# output-frame stream. The single output frame is written through a private dup of the original fd 1,
+# so only the shim can reach it. Rebinding sys.stdout alone would miss every writer that skips it.
+_output = os.fdopen(os.dup(1), "w", encoding="utf-8")
+os.dup2(2, 1)
+sys.stdout = sys.stderr  # keep the Python-level name in step with the redirected fd
 
 
 def _emit_output(frame):
-    # Serialize fully before writing so a non-JSON result raises here (caught below) instead of
-    # writing a half-frame; then the sole write reaches the real stdout intact.
-    text = json.dumps(frame)
-    _real_stdout.write(text)
-    _real_stdout.flush()
+    # Serialize fully before writing (allow_nan=False rejects NaN/Infinity, which aren't valid JSON per
+    # RFC 8259) so a non-serializable result raises here — caught below and turned into an error frame —
+    # instead of emitting a malformed frame; then the sole write reaches the real stdout intact.
+    text = json.dumps(frame, allow_nan=False)
+    _output.write(text)
+    _output.flush()
 
 
 def _run():
@@ -51,5 +59,8 @@ def _run():
 
 try:
     _emit_output(_run())
-except Exception as exc:  # any step failure (load, call, non-JSON result) becomes an error frame
-    _emit_output({"ok": False, "error": str(exc)})
+# BaseException, not Exception: a step that calls sys.exit() (raising SystemExit) or is interrupted
+# (KeyboardInterrupt) must still emit a frame — otherwise the runner sees empty stdout and a bare
+# non-zero exit code instead of a structured error.
+except BaseException as exc:
+    _emit_output({"ok": False, "error": str(exc) or f"step raised {type(exc).__name__}"})

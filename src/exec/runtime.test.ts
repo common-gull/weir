@@ -73,6 +73,29 @@ test('a node module without a default export is rejected with a clear error', as
     expect(out.ok === false && out.error).toMatch(/export default/);
 }, 15_000);
 
+test('a node module writing directly to process.stdout keeps the output frame intact', async () => {
+    const logs: LogFrame[] = [];
+    const out = await runProtocol({
+        argv: buildArgv({ runtime: 'node', module: fixture('node-stdout-write.ts') }),
+        input: { n: 1 },
+        timeoutMs: 10_000,
+        onLog: (f) => logs.push(f),
+    });
+    // A raw process.stdout write did not corrupt the frame — it was rerouted to the log channel.
+    expect(out).toEqual({ ok: true, result: { echoed: { n: 1 }, from: 'node-stdout' } });
+    expect(logs.some((f) => f.message.includes('raw progress-bar bytes'))).toBe(true);
+}, 15_000);
+
+test('a node module calling process.exit() still returns a structured frame', async () => {
+    const out = await runProtocol({
+        argv: buildArgv({ runtime: 'node', module: fixture('node-exit.ts') }),
+        input: null,
+        timeoutMs: 10_000,
+    });
+    expect(out.ok).toBe(false);
+    expect(out.ok === false && out.error).toMatch(/exited the process/);
+}, 15_000);
+
 pyTest(
     'runs a python module end-to-end and routes print() to the log channel',
     async () => {
@@ -86,6 +109,50 @@ pyTest(
         expect(out).toEqual({ ok: true, result: { echoed: { n: 7 }, from: 'python' } });
         // print() lands on stderr as a raw line, surfaced by the runner as an info log.
         expect(logs.some((f) => f.message.includes('processing from python'))).toBe(true);
+    },
+    15_000,
+);
+
+pyTest(
+    'a python module writing directly to fd 1 keeps the output frame intact',
+    async () => {
+        const logs: LogFrame[] = [];
+        const out = await runProtocol({
+            argv: buildArgv({ runtime: 'python', module: fixture('python-stdout-write.py') }),
+            input: { n: 3 },
+            timeoutMs: 10_000,
+            onLog: (f) => logs.push(f),
+        });
+        // os.write(1, ...) bypasses sys.stdout, but fd 1 is redirected — the frame stays clean.
+        expect(out).toEqual({ ok: true, result: { echoed: { n: 3 }, from: 'python-fd1' } });
+        expect(logs.some((f) => f.message.includes('raw bytes straight to fd 1'))).toBe(true);
+    },
+    15_000,
+);
+
+pyTest(
+    'a python module calling sys.exit() returns a structured error frame',
+    async () => {
+        const out = await runProtocol({
+            argv: buildArgv({ runtime: 'python', module: fixture('python-exit.py') }),
+            input: null,
+            timeoutMs: 10_000,
+        });
+        expect(out.ok).toBe(false);
+        expect(out.ok === false && out.error).toMatch(/boom via sys.exit/);
+    },
+    15_000,
+);
+
+pyTest(
+    'a python module returning NaN is rejected as an error frame, not invalid JSON',
+    async () => {
+        const out = await runProtocol({
+            argv: buildArgv({ runtime: 'python', module: fixture('python-nan.py') }),
+            input: null,
+            timeoutMs: 10_000,
+        });
+        expect(out.ok).toBe(false);
     },
     15_000,
 );
