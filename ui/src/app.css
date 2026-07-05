@@ -99,7 +99,10 @@ body::before {
 #app { height: 100vh; }
 
 .app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
-.sidebar { border-right: 2px solid var(--line); overflow-y: auto; background: var(--sidebar-tint); }
+.sidebar { border-right: 2px solid var(--line); overflow-y: auto; background: var(--sidebar-tint); display: flex; flex-direction: column; }
+/* The runs list scrolls on its own so a busy engine can't push Workflows / the Runs filters away. */
+.runs { flex: 1; overflow-y: auto; min-height: 0; }
+.runs-hint { padding: 8px 16px; color: var(--ink-soft); font-family: var(--mono); font-size: 10.5px; text-align: center; }
 .main { overflow-y: auto; padding: 20px 26px; }
 
 .brand { padding: 16px 16px; border-bottom: 2px solid var(--line); display: flex; align-items: center; gap: 9px; }
