@@ -38,6 +38,15 @@ if (mode === 'hang') {
         await Bun.sleep(0); // yield so each chunk reaches the parent as its own read
     }
     process.stdout.write(encodeOutput({ ok: true, result: 'done' }));
+} else if (mode === 'stderr-multibyte') {
+    // Same as stderr-bigline but with 3-byte UTF-8 characters: the parent must cap its buffer by
+    // byte count, not UTF-16 code units, or the buffer grows to ~3x maxStderrLineBytes before a flush.
+    const chunk = '好'.repeat(24 * 1024); // 24Ki code units, 72 KiB
+    for (let i = 0; i < 6; i++) {
+        process.stderr.write(chunk);
+        await Bun.sleep(0); // yield so each chunk reaches the parent as its own read
+    }
+    process.stdout.write(encodeOutput({ ok: true, result: 'done' }));
 } else if (mode === 'crash') {
     process.exit(3); // exit non-zero without ever writing an output frame
 } else {

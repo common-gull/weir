@@ -55,6 +55,38 @@ test('a huge newline-less stderr line is flushed in bounded chunks, not accumula
     expect(logs.map((f) => f.message).join('')).toBe('e'.repeat(8 * 32 * 1024));
 });
 
+test('the stderr line cap is enforced in bytes, so a multi-byte line stays bounded', async () => {
+    const cap = 128 * 1024;
+    const logs: LogFrame[] = [];
+    const out = await runProtocol({
+        argv,
+        input: { mode: 'stderr-multibyte' },
+        timeoutMs: 10_000,
+        maxStderrLineBytes: cap,
+        onLog: (f) => logs.push(f),
+    });
+    expect(out).toEqual({ ok: true, result: 'done' });
+    // Nothing is dropped or corrupted at the flush boundaries: the pieces reconstruct the original.
+    expect(logs.map((f) => f.message).join('')).toBe('好'.repeat(6 * 24 * 1024));
+    // The bug: counting UTF-16 code units would let a 3-byte-per-char line reach ~3x the cap before a
+    // flush. Bounding by bytes keeps every flushed frame near the cap (plus at most one pending read).
+    const enc = new TextEncoder();
+    const maxFrameBytes = Math.max(...logs.map((f) => enc.encode(f.message).byteLength));
+    expect(maxFrameBytes).toBeLessThanOrEqual(2 * cap);
+});
+
+test('a throwing onLog sink is swallowed rather than crashing the run', async () => {
+    const out = await runProtocol({
+        argv,
+        input: { mode: 'logs' },
+        timeoutMs: 10_000,
+        onLog: () => {
+            throw new Error('log sink is down');
+        },
+    });
+    expect(out).toEqual({ ok: true, result: { mode: 'logs' } });
+});
+
 test('a failed output frame is returned, not thrown', async () => {
     const out = await runProtocol({ argv, input: { mode: 'fail', message: 'boom' }, timeoutMs: 10_000 });
     expect(out).toEqual({ ok: false, error: 'boom' });

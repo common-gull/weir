@@ -56,19 +56,29 @@ async function pumpLines(
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buf = '';
+    // Bound the buffer by UTF-8 byte count, not buf.length (UTF-16 code units): one multi-byte
+    // character is a single code unit but up to 4 bytes, so a code-unit cap would let the buffer grow
+    // to several times maxLineBytes. While we only append, `value.byteLength` is the exact byte count;
+    // once a newline lets us drop leading lines, recompute the shrunk tail's byte size.
+    let bufBytes = 0;
     for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
+        bufBytes += value.byteLength;
         let nl = buf.indexOf('\n');
-        while (nl !== -1) {
-            onLine(buf.slice(0, nl));
-            buf = buf.slice(nl + 1);
-            nl = buf.indexOf('\n');
+        if (nl !== -1) {
+            while (nl !== -1) {
+                onLine(buf.slice(0, nl));
+                buf = buf.slice(nl + 1);
+                nl = buf.indexOf('\n');
+            }
+            bufBytes = Buffer.byteLength(buf);
         }
-        if (buf.length > maxLineBytes) {
+        if (bufBytes > maxLineBytes) {
             onLine(buf);
             buf = '';
+            bufBytes = 0;
         }
     }
     const tail = buf + decoder.decode();
@@ -157,9 +167,18 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
     signal?.addEventListener('abort', onAbort, { once: true });
 
     // Always drain stderr, even without an onLog, so a chatty child can't deadlock on a full pipe.
+    // stderrDone isn't awaited until stdout drains and the child exits — potentially seconds later — so
+    // guard the pump on both fronts. A throwing log sink is caught per line so it neither aborts
+    // draining nor rejects the promise; the trailing .catch keeps a stray stream-read error from
+    // becoming an unhandled rejection (which would crash the daemon) during that unawaited window.
     const stderrDone = pumpLines(proc.stderr, maxStderrLineBytes, (line) => {
-        if (onLog) forwardLog(line, onLog);
-    });
+        if (!onLog) return;
+        try {
+            forwardLog(line, onLog);
+        } catch {
+            /* best-effort diagnostics: a failing log sink must not tear down the run */
+        }
+    }).catch(() => undefined);
 
     try {
         const stdout = await readCapped(proc.stdout, maxOutputBytes, () => {
