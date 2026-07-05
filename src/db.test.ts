@@ -45,6 +45,15 @@ test('assertSerializable rejects values JSON would silently drop, and passes pla
     expect(() => assertSerializable(undefined, 's')).not.toThrow(); // "no result" is fine
 });
 
+test('newest-first run listing is served by ix_runs_created without a temp b-tree sort', () => {
+    const plan = db.query(`EXPLAIN QUERY PLAN SELECT id FROM runs ORDER BY created_at DESC LIMIT 50`).all() as {
+        detail: string;
+    }[];
+    const detail = plan.map((r) => r.detail).join('\n');
+    expect(detail).toContain('ix_runs_created');
+    expect(detail).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+});
+
 test('pruneHistory clears expired kv', () => {
     db.query(`INSERT INTO kv (namespace, key, value, expires_at, updated_at) VALUES ('n','k','1',?,?)`).run(
         Date.now() - 1000,
