@@ -68,16 +68,14 @@ export function createServer(deps: ServerDeps) {
             const counts = db
                 .query(`SELECT status, COUNT(*) AS c FROM runs WHERE workflow = ? GROUP BY status`)
                 .all(wf.name) as { status: string; c: number }[];
-            // A scheduled workflow whose row is `enabled = 0` is paused (see Scheduler.pauseWorkflow).
-            const sched = wf.opts.schedule
-                ? (db.query(`SELECT enabled FROM schedules WHERE id = ?`).get(`wf:${wf.name}`) as {
-                      enabled: number;
-                  } | null)
-                : null;
+            // Paused iff a schedule row exists with enabled = 0; false when there's no schedule.
+            const sched = db.query(`SELECT enabled FROM schedules WHERE workflow = ?`).get(wf.name) as
+                | { enabled: number }
+                | undefined;
             return {
                 name: wf.name,
                 schedule: wf.opts.schedule ?? null,
-                schedulePaused: sched ? sched.enabled === 0 : false,
+                schedulePaused: sched?.enabled === 0,
                 capabilities: wf.opts.capabilities ?? [],
                 priority: wf.opts.priority ?? 0,
                 lastRun: last ?? null,
@@ -237,20 +235,15 @@ export function createServer(deps: ServerDeps) {
         return json({ id });
     });
 
-    // Pause / resume a workflow's cron schedule. Only affects scheduled firing — Start run above and
-    // `weir run` are unaffected. The Scheduler owns the enabled flag, so both need it wired up.
-    // `changed` reports whether the flag actually flipped: false means the request was a no-op
-    // (already in that state, or no schedule row for the name), so callers don't read `ok` as
-    // "state applied" when nothing moved.
-    on('POST', /^\/api\/workflows\/([^/]+)\/pause$/, (_req, m) => {
-        if (!scheduler) return json({ error: 'scheduler unavailable' }, 503);
-        return json({ ok: true, changed: scheduler.pauseWorkflow(seg(m)) });
-    });
-
-    on('POST', /^\/api\/workflows\/([^/]+)\/resume$/, (_req, m) => {
-        if (!scheduler) return json({ error: 'scheduler unavailable' }, 503);
-        return json({ ok: true, changed: scheduler.resumeWorkflow(seg(m)) });
-    });
+    // Pause / resume a workflow's schedule — hold or release future scheduled fires only (manual
+    // runs and in-flight runs are untouched). `ok` is false when there was no matching schedule to
+    // toggle. Absent a scheduler (read-only API mode) there's nothing to pause, so report false.
+    on('POST', /^\/api\/workflows\/([^/]+)\/pause$/, (_req, m) =>
+        json({ ok: scheduler?.pauseWorkflow(seg(m)) ?? false }),
+    );
+    on('POST', /^\/api\/workflows\/([^/]+)\/resume$/, (_req, m) =>
+        json({ ok: scheduler?.resumeWorkflow(seg(m)) ?? false }),
+    );
 
     on('POST', /^\/api\/runs\/([^/]+)\/retry$/, async (req, m) => {
         const body = (await req.json().catch(() => ({}))) as { from?: string };

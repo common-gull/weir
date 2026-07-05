@@ -135,31 +135,33 @@ export class Scheduler {
     }
 
     /**
-     * Pause a workflow's schedule: the tick loop only selects `enabled = 1` rows, so flipping the
-     * flag stops scheduled firing while leaving `next_fire_at`/`last_fire_at` intact. Manual runs
-     * (`weir run`, the UI's Start run) don't go through the scheduler and keep working. Returns
-     * whether the flag actually changed — false if already paused or there's no schedule row.
+     * Stop firing new scheduled runs for a workflow — a pause. Manual runs and any already
+     * queued/running run are unaffected; only future scheduled fires are held. Persists across
+     * reload/restart (`syncFromRegistry`'s UPDATE never touches `enabled`). Returns false when the
+     * workflow has no enabled schedule (nothing to pause). Mirrors `Executor.cancel` living on the
+     * executor.
      */
-    pauseWorkflow(name: string): boolean {
-        return this.setScheduleEnabled(name, false);
+    pauseWorkflow(workflow: string): boolean {
+        const res = this.db.query(`UPDATE schedules SET enabled = 0 WHERE workflow = ? AND enabled = 1`).run(workflow);
+        const changed = (res.changes as number) > 0;
+        if (changed) emit(this.db, { type: 'schedule.paused', message: workflow });
+        return changed;
     }
 
     /**
-     * Resume a paused schedule. `next_fire_at` was left where it was, so the next tick applies the
-     * workflow's catch-up policy to any slots missed while paused (default `skip`: advance past now
-     * without a backlog).
+     * Resume firing for a paused workflow, then tick once so a now-due schedule fires immediately
+     * instead of waiting for the next interval. While paused `next_fire_at` never advanced, so the
+     * tick walks the missed window under the workflow's `catchup` policy (default `skip` → no
+     * backfill flood). Returns false when the workflow has no paused schedule (nothing to resume).
      */
-    resumeWorkflow(name: string): boolean {
-        return this.setScheduleEnabled(name, true);
-    }
-
-    private setScheduleEnabled(name: string, on: boolean): boolean {
-        const res = this.db
-            .query(`UPDATE schedules SET enabled = ? WHERE id = ? AND enabled = ?`)
-            .run(on ? 1 : 0, `wf:${name}`, on ? 0 : 1);
-        if ((res.changes as number) === 0) return false;
-        emit(this.db, { type: on ? 'schedule.resumed' : 'schedule.paused', message: name });
-        return true;
+    resumeWorkflow(workflow: string): boolean {
+        const res = this.db.query(`UPDATE schedules SET enabled = 1 WHERE workflow = ? AND enabled = 0`).run(workflow);
+        const changed = (res.changes as number) > 0;
+        if (changed) {
+            emit(this.db, { type: 'schedule.resumed', message: workflow });
+            this.tick();
+        }
+        return changed;
     }
 
     /** Evaluate all due schedules once. Returns the number of runs created. */
