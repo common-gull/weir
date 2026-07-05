@@ -113,75 +113,75 @@ CREATE INDEX IF NOT EXISTS ix_events_run ON events(run_id, id);
 export type DB = Database;
 
 export function openDb(path: string): DB {
-  const db = new Database(path, { create: true });
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = NORMAL');
-  db.exec('PRAGMA busy_timeout = 5000');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec(SCHEMA);
-  return db;
+    const db = new Database(path, { create: true });
+    db.run('PRAGMA journal_mode = WAL');
+    db.run('PRAGMA synchronous = NORMAL');
+    db.run('PRAGMA busy_timeout = 5000');
+    db.run('PRAGMA foreign_keys = ON');
+    db.run(SCHEMA);
+    return db;
 }
 
 /** Run `fn` inside an IMMEDIATE transaction. `fn` MUST be pure/synchronous DB work. */
 export function tx<T>(db: DB, fn: () => T): T {
-  const wrapped = db.transaction(fn);
-  return wrapped();
+    const wrapped = db.transaction(fn);
+    return wrapped();
 }
 
 // ---- small JSON helpers (the memo boundary is JSON) ----
 
 export function toJson(value: unknown): string | null {
-  if (value === undefined) return null;
-  return JSON.stringify(value);
+    if (value === undefined) return null;
+    return JSON.stringify(value);
 }
 
 export function fromJson<T = unknown>(s: string | null): T | undefined {
-  if (s == null) return undefined;
-  return JSON.parse(s) as T;
+    if (s == null) return undefined;
+    return JSON.parse(s) as T;
 }
 
 /** Assert a value survives JSON without silently losing data; throw naming the offending step. */
 export function assertSerializable(value: unknown, label: string): void {
-  if (value === undefined) return;
-  const lossy = jsonLossReason(value, new Set());
-  if (lossy) {
-    throw new Error(`step "${label}" returned a value JSON can't preserve (${lossy}) — return plain JSON data.`);
-  }
-  try {
-    JSON.stringify(value);
-  } catch (e) {
-    throw new Error(`step "${label}" returned a non-serializable value: ${(e as Error).message}`);
-  }
+    if (value === undefined) return;
+    const lossy = jsonLossReason(value, new Set());
+    if (lossy) {
+        throw new Error(`step "${label}" returned a value JSON can't preserve (${lossy}) — return plain JSON data.`);
+    }
+    try {
+        JSON.stringify(value);
+    } catch (e) {
+        throw new Error(`step "${label}" returned a non-serializable value: ${(e as Error).message}`);
+    }
 }
 
 /** Walk a value and return a reason string if JSON would silently drop/mangle it, else null. */
 function jsonLossReason(v: unknown, seen: Set<object>): string | null {
-  const t = typeof v;
-  if (v === null || t === 'string' || t === 'number' || t === 'boolean') return null;
-  if (t === 'function') return 'a function';
-  if (t === 'symbol') return 'a symbol';
-  if (t === 'bigint') return 'a bigint';
-  if (t !== 'object') return `a ${t}`;
-  const o = v as object;
-  if (seen.has(o)) return 'a circular reference';
-  seen.add(o);
-  if (o instanceof Map) return 'a Map';
-  if (o instanceof Set) return 'a Set';
-  if (Array.isArray(o)) {
-    for (const item of o) {
-      const r = jsonLossReason(item, seen);
-      if (r) return r;
+    const t = typeof v;
+    if (v === null || t === 'string' || t === 'number' || t === 'boolean') return null;
+    if (t === 'function') return 'a function';
+    if (t === 'symbol') return 'a symbol';
+    if (t === 'bigint') return 'a bigint';
+    if (t !== 'object') return `a ${t}`;
+    const o = v as object;
+    if (seen.has(o)) return 'a circular reference';
+    seen.add(o);
+    if (o instanceof Map) return 'a Map';
+    if (o instanceof Set) return 'a Set';
+    if (Array.isArray(o)) {
+        for (const item of o) {
+            const r = jsonLossReason(item, seen);
+            if (r) return r;
+        }
+        return null;
+    }
+    // Plain object (Date → ISO string and class instances keep their data, so both pass).
+    for (const k of Object.keys(o)) {
+        const val = (o as Record<string, unknown>)[k];
+        if (val === undefined) return `an undefined value at "${k}"`;
+        const r = jsonLossReason(val, seen);
+        if (r) return r;
     }
     return null;
-  }
-  // Plain object (Date → ISO string and class instances keep their data, so both pass).
-  for (const k of Object.keys(o)) {
-    const val = (o as Record<string, unknown>)[k];
-    if (val === undefined) return `an undefined value at "${k}"`;
-    const r = jsonLossReason(val, seen);
-    if (r) return r;
-  }
-  return null;
 }
 
 const TERMINAL = `('completed','failed','cancelled','interrupted')`;
@@ -189,44 +189,44 @@ const TERMINAL = `('completed','failed','cancelled','interrupted')`;
 /** Delete terminal runs (and their steps/attempts/events) finished before the retention
  *  window, plus expired kv and orphaned events. Keeps the store bounded. */
 export function pruneHistory(db: DB, opts: { days?: number } = {}): { runs: number; events: number } {
-  const cutoff = Date.now() - (opts.days ?? 14) * 86_400_000;
-  return tx(db, () => {
-    const old = db
-      .query(`SELECT id FROM runs WHERE status IN ${TERMINAL} AND finished_at IS NOT NULL AND finished_at < ?`)
-      .all(cutoff) as { id: string }[];
-    for (const r of old) {
-      db.query(`DELETE FROM events WHERE run_id = ?`).run(r.id);
-      db.query(`DELETE FROM step_attempts WHERE run_id = ?`).run(r.id);
-      db.query(`DELETE FROM steps WHERE run_id = ?`).run(r.id);
-      db.query(`DELETE FROM runs WHERE id = ?`).run(r.id);
-    }
-    db.query(`DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?`).run(Date.now());
-    const orphan = db
-      .query(`DELETE FROM events WHERE run_id IS NOT NULL AND run_id NOT IN (SELECT id FROM runs) AND ts < ?`)
-      .run(cutoff);
-    return { runs: old.length, events: (orphan.changes as number) };
-  });
+    const cutoff = Date.now() - (opts.days ?? 14) * 86_400_000;
+    return tx(db, () => {
+        const old = db
+            .query(`SELECT id FROM runs WHERE status IN ${TERMINAL} AND finished_at IS NOT NULL AND finished_at < ?`)
+            .all(cutoff) as { id: string }[];
+        for (const r of old) {
+            db.query(`DELETE FROM events WHERE run_id = ?`).run(r.id);
+            db.query(`DELETE FROM step_attempts WHERE run_id = ?`).run(r.id);
+            db.query(`DELETE FROM steps WHERE run_id = ?`).run(r.id);
+            db.query(`DELETE FROM runs WHERE id = ?`).run(r.id);
+        }
+        db.query(`DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?`).run(Date.now());
+        const orphan = db
+            .query(`DELETE FROM events WHERE run_id IS NOT NULL AND run_id NOT IN (SELECT id FROM runs) AND ts < ?`)
+            .run(cutoff);
+        return { runs: old.length, events: orphan.changes as number };
+    });
 }
 
 export function emit(
-  db: DB,
-  ev: { runId?: string | null; seq?: number | null; type: string; level?: string; message?: string; data?: unknown },
+    db: DB,
+    ev: { runId?: string | null; seq?: number | null; type: string; level?: string; message?: string; data?: unknown },
 ): void {
-  const ts = Date.now();
-  const data = ev.data === undefined ? null : JSON.stringify(ev.data);
-  const res = db
-    .query(`INSERT INTO events (run_id, seq, ts, type, level, message, data) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(ev.runId ?? null, ev.seq ?? null, ts, ev.type, ev.level ?? null, ev.message ?? null, data);
-  // Fan the just-written row out to live SSE subscribers immediately (no 500ms poll gap). We build
-  // the row from the same values rather than re-reading it — the id is the row we just inserted.
-  publishEvent({
-    id: Number(res.lastInsertRowid),
-    run_id: ev.runId ?? null,
-    seq: ev.seq ?? null,
-    ts,
-    type: ev.type,
-    level: ev.level ?? null,
-    message: ev.message ?? null,
-    data,
-  });
+    const ts = Date.now();
+    const data = ev.data === undefined ? null : JSON.stringify(ev.data);
+    const res = db
+        .query(`INSERT INTO events (run_id, seq, ts, type, level, message, data) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(ev.runId ?? null, ev.seq ?? null, ts, ev.type, ev.level ?? null, ev.message ?? null, data);
+    // Fan the just-written row out to live SSE subscribers immediately (no 500ms poll gap). We build
+    // the row from the same values rather than re-reading it — the id is the row we just inserted.
+    publishEvent({
+        id: Number(res.lastInsertRowid),
+        run_id: ev.runId ?? null,
+        seq: ev.seq ?? null,
+        ts,
+        type: ev.type,
+        level: ev.level ?? null,
+        message: ev.message ?? null,
+        data,
+    });
 }

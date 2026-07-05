@@ -11,27 +11,27 @@ import { unlinkSync } from 'node:fs';
 const raw = await Bun.stdin.text();
 let payload: { code: string; input: unknown };
 try {
-  payload = JSON.parse(raw);
+    payload = JSON.parse(raw);
 } catch {
-  process.stdout.write(JSON.stringify({ ok: false, error: 'invalid isolate payload' }));
-  process.exit(2);
+    process.stdout.write(JSON.stringify({ ok: false, error: 'invalid isolate payload' }));
+    process.exit(2);
 }
 
 const tmp = join(tmpdir(), `weir-iso-${crypto.randomUUID()}.mjs`);
 await Bun.write(tmp, payload.code);
 try {
-  const mod = await import(pathToFileURL(tmp).href);
-  if (typeof mod.default !== 'function') {
-    throw new Error('custom JS must `export default` a function: (input) => result');
-  }
-  const result = await mod.default(payload.input);
-  process.stdout.write(JSON.stringify({ ok: true, result: result === undefined ? null : result }));
+    const mod = await import(pathToFileURL(tmp).href);
+    if (typeof mod.default !== 'function') {
+        throw new Error('custom JS must `export default` a function: (input) => result');
+    }
+    const result = await mod.default(payload.input);
+    process.stdout.write(JSON.stringify({ ok: true, result: result === undefined ? null : result }));
 } catch (e) {
-  process.stdout.write(JSON.stringify({ ok: false, error: (e as Error).message }));
+    process.stdout.write(JSON.stringify({ ok: false, error: (e as Error).message }));
 } finally {
-  try {
-    unlinkSync(tmp);
-  } catch {
-    /* best effort */
-  }
+    try {
+        unlinkSync(tmp);
+    } catch {
+        /* best effort */
+    }
 }

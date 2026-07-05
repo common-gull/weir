@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": ["ui"],
   "module": "src/cli.ts",
   "bin": {
     "weir": "src/cli.ts"
@@ -11,9 +12,15 @@
     "start": "bun run src/cli.ts start",
     "cli": "bun run src/cli.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "build:ui": "bun run --filter='weir-ui' build",
+    "check:ui": "bun run --filter='weir-ui' check",
+    "check": "bun run lint && bun run typecheck && bun run test && bun run check:ui"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
     "@types/bun": "latest",
     "typescript": "^5.6.0"
   }

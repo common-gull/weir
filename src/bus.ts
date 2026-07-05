@@ -6,25 +6,25 @@ import { EventEmitter } from 'node:events';
 
 /** The shape of an `events` row, as pushed to subscribers (matches `SELECT * FROM events`). */
 export interface EmittedEvent {
-  id: number;
-  run_id: string | null;
-  seq: number | null;
-  ts: number;
-  type: string;
-  level: string | null;
-  message: string | null;
-  data: string | null;
+    id: number;
+    run_id: string | null;
+    seq: number | null;
+    ts: number;
+    type: string;
+    level: string | null;
+    message: string | null;
+    data: string | null;
 }
 
 const bus = new EventEmitter();
 bus.setMaxListeners(0); // one listener per open SSE connection — don't warn as tabs multiply
 
 export function publishEvent(row: EmittedEvent): void {
-  bus.emit('event', row);
+    bus.emit('event', row);
 }
 
 /** Subscribe to freshly emitted events. Returns an unsubscribe function. */
 export function onEvent(fn: (row: EmittedEvent) => void): () => void {
-  bus.on('event', fn);
-  return () => bus.off('event', fn);
+    bus.on('event', fn);
+    return () => bus.off('event', fn);
 }

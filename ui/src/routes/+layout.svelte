@@ -83,10 +83,10 @@
   <div class="sidebar">
     <div class="brand">
       <span class="brandname">weir</span>
-      <button class="btn sm" style="margin-left: auto" onclick={toggleTheme} title="Toggle light / dark paper" aria-label="Toggle light or dark theme">
+      <button type="button" class="btn sm" style="margin-left: auto" onclick={toggleTheme} title="Toggle light / dark paper" aria-label="Toggle light or dark theme">
         {theme === 'dark' ? '☀' : '☾'}
       </button>
-      <button class="btn sm" onclick={reload} disabled={reloading} title="Reload workflow files from disk">
+      <button type="button" class="btn sm" onclick={reload} disabled={reloading} title="Reload workflow files from disk">
         {reloading ? '…' : '↻ reload'}
       </button>
     </div>
@@ -99,7 +99,7 @@
           <span class="chev">›</span>
         </div>
         <div class="meta">
-          {w.schedule ? w.schedule.cron : 'manual'}{w.capabilities.length ? ' · ' + w.capabilities.join(',') : ''}
+          {w.schedule ? w.schedule.cron : 'manual'}{w.capabilities.length ? ` · ${w.capabilities.join(',')}` : ''}
         </div>
       </a>
     {/each}

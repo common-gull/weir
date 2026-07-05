@@ -17,66 +17,67 @@ import { fileURLToPath } from 'node:url';
 const RUNNER = fileURLToPath(new URL('./isolate-runner.ts', import.meta.url));
 
 export interface IsolateOpts {
-  timeoutMs?: number; // hard CPU/wall limit → SIGKILL (default 30s)
-  memoryMb?: number; // RSS soft cap → SIGKILL when exceeded
-  pollMs?: number; // memory poll interval (default 150ms)
+    timeoutMs?: number; // hard CPU/wall limit → SIGKILL (default 30s)
+    memoryMb?: number; // RSS soft cap → SIGKILL when exceeded
+    pollMs?: number; // memory poll interval (default 150ms)
 }
 
 /** Read a process's resident memory in bytes. /proc on Linux; `ps` fallback on other Unix. */
 function readRssBytes(pid: number): number {
-  try {
-    const resident = Number(readFileSync(`/proc/${pid}/statm`, 'utf8').trim().split(/\s+/)[1]);
-    if (Number.isFinite(resident)) return resident * 4096;
-  } catch {
-    /* not Linux, or gone */
-  }
-  try {
-    const out = execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .toString()
-      .trim();
-    return Number(out) * 1024;
-  } catch {
-    return 0;
-  }
+    try {
+        const resident = Number(readFileSync(`/proc/${pid}/statm`, 'utf8').trim().split(/\s+/)[1]);
+        if (Number.isFinite(resident)) return resident * 4096;
+    } catch {
+        /* not Linux, or gone */
+    }
+    try {
+        const out = execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+        })
+            .toString()
+            .trim();
+        return Number(out) * 1024;
+    } catch {
+        return 0;
+    }
 }
 
 export async function runIsolated(code: string, input: unknown, opts: IsolateOpts = {}): Promise<unknown> {
-  const timeoutMs = opts.timeoutMs ?? 30_000;
-  const proc = Bun.spawn(['bun', RUNNER], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
-  proc.stdin.write(JSON.stringify({ code, input }));
-  proc.stdin.end();
+    const timeoutMs = opts.timeoutMs ?? 30_000;
+    const proc = Bun.spawn(['bun', RUNNER], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    proc.stdin.write(JSON.stringify({ code, input }));
+    proc.stdin.end();
 
-  let killed: 'timeout' | 'memory' | null = null;
-  const timer = setTimeout(() => {
-    killed = 'timeout';
-    proc.kill(9);
-  }, timeoutMs);
-  const poll = opts.memoryMb
-    ? setInterval(() => {
-        if (readRssBytes(proc.pid) > opts.memoryMb! * 1024 * 1024) {
-          killed = 'memory';
-          proc.kill(9);
-        }
-      }, opts.pollMs ?? 150)
-    : undefined;
+    let killed: 'timeout' | 'memory' | null = null;
+    const timer = setTimeout(() => {
+        killed = 'timeout';
+        proc.kill(9);
+    }, timeoutMs);
+    const memoryBytes = (opts.memoryMb ?? 0) * 1024 * 1024;
+    const poll = opts.memoryMb
+        ? setInterval(() => {
+              if (readRssBytes(proc.pid) > memoryBytes) {
+                  killed = 'memory';
+                  proc.kill(9);
+              }
+          }, opts.pollMs ?? 150)
+        : undefined;
 
-  const out = await new Response(proc.stdout).text();
-  const exit = await proc.exited;
-  clearTimeout(timer);
-  if (poll) clearInterval(poll);
+    const out = await new Response(proc.stdout).text();
+    const exit = await proc.exited;
+    clearTimeout(timer);
+    if (poll) clearInterval(poll);
 
-  if (killed === 'timeout') throw new Error(`isolated step timed out after ${timeoutMs}ms (killed)`);
-  if (killed === 'memory') throw new Error(`isolated step exceeded ${opts.memoryMb}MB (killed)`);
-  if (exit !== 0) throw new Error(`isolated step crashed (exit ${exit})`);
+    if (killed === 'timeout') throw new Error(`isolated step timed out after ${timeoutMs}ms (killed)`);
+    if (killed === 'memory') throw new Error(`isolated step exceeded ${opts.memoryMb}MB (killed)`);
+    if (exit !== 0) throw new Error(`isolated step crashed (exit ${exit})`);
 
-  let parsed: { ok: boolean; result?: unknown; error?: string };
-  try {
-    parsed = JSON.parse(out);
-  } catch {
-    throw new Error(`isolated step produced no result (exit ${exit})`);
-  }
-  if (!parsed.ok) throw new Error(`isolated step failed: ${parsed.error}`);
-  return parsed.result;
+    let parsed: { ok: boolean; result?: unknown; error?: string };
+    try {
+        parsed = JSON.parse(out);
+    } catch {
+        throw new Error(`isolated step produced no result (exit ${exit})`);
+    }
+    if (!parsed.ok) throw new Error(`isolated step failed: ${parsed.error}`);
+    return parsed.result;
 }

@@ -14,8 +14,8 @@ resumes from the step that failed instead of starting over.
 ## Setup
 
 ```sh
-bun install
-(cd ui && bun install && bun run build)
+bun install          # installs workspace deps (root + ui)
+bun run build:ui     # build the web UI the daemon serves
 ```
 
 ## Usage

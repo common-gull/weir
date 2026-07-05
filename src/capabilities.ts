@@ -7,40 +7,40 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Capability } from './types.ts';
 
 interface CapStore {
-  workflow: string;
-  caps: Set<Capability>;
+    workflow: string;
+    caps: Set<Capability>;
 }
 
 const als = new AsyncLocalStorage<CapStore>();
 
 export class CapabilityError extends Error {
-  constructor(cap: Capability, workflow: string) {
-    super(
-      `workflow "${workflow}" attempted a "${cap}" action without the capability. ` +
-        `Add \`capabilities: ['${cap}']\` to its definition to allow it.`,
-    );
-    this.name = 'CapabilityError';
-  }
+    constructor(cap: Capability, workflow: string) {
+        super(
+            `workflow "${workflow}" attempted a "${cap}" action without the capability. ` +
+                `Add \`capabilities: ['${cap}']\` to its definition to allow it.`,
+        );
+        this.name = 'CapabilityError';
+    }
 }
 
 /** Run `fn` with the given workflow's capabilities in scope. */
 export function withCapabilities<T>(store: CapStore, fn: () => T): T {
-  return als.run(store, fn);
+    return als.run(store, fn);
 }
 
 export function hasCapability(cap: Capability): boolean {
-  return als.getStore()?.caps.has(cap) ?? false;
+    return als.getStore()?.caps.has(cap) ?? false;
 }
 
 /** Throw unless the current workflow declared `cap`. Call this at the top of an outward action. */
 export function requireCapability(cap: Capability): void {
-  const store = als.getStore();
-  if (!store) throw new Error(`requireCapability("${cap}") called outside a workflow run`);
-  if (!store.caps.has(cap)) throw new CapabilityError(cap, store.workflow);
+    const store = als.getStore();
+    if (!store) throw new Error(`requireCapability("${cap}") called outside a workflow run`);
+    if (!store.caps.has(cap)) throw new CapabilityError(cap, store.workflow);
 }
 
 export function currentWorkflow(): string | undefined {
-  return als.getStore()?.workflow;
+    return als.getStore()?.workflow;
 }
 
 // ---- capability registry ----
@@ -54,32 +54,32 @@ const registry = new Map<Capability, string>();
 
 /** Declare a capability so it's known to doctor/list/the UI. Idempotent (last description wins). */
 export function defineCapability(name: Capability, description: string): void {
-  registry.set(name, description);
+    registry.set(name, description);
 }
 
 /** All declared capabilities, name → description. Complete only after workflows (and their lib/
  *  imports) have loaded, since custom capabilities register when their module is imported. */
 export function knownCapabilities(): ReadonlyMap<Capability, string> {
-  return registry;
+    return registry;
 }
 
 export function isKnownCapability(name: Capability): boolean {
-  return registry.has(name);
+    return registry.has(name);
 }
 
 /** Capabilities a workflow declares that aren't in the registry — surfaced as warnings, not
  *  errors (an unregistered capability still enforces; it's just undocumented). Structurally typed
  *  so this stays free of an engine import (avoids a cycle). */
 export function unknownCapabilities(
-  workflows: readonly { readonly name: string; readonly opts: { readonly capabilities?: readonly Capability[] } }[],
+    workflows: readonly { readonly name: string; readonly opts: { readonly capabilities?: readonly Capability[] } }[],
 ): { workflow: string; capability: Capability }[] {
-  const out: { workflow: string; capability: Capability }[] = [];
-  for (const wf of workflows) {
-    for (const cap of wf.opts.capabilities ?? []) {
-      if (!registry.has(cap)) out.push({ workflow: wf.name, capability: cap });
+    const out: { workflow: string; capability: Capability }[] = [];
+    for (const wf of workflows) {
+        for (const cap of wf.opts.capabilities ?? []) {
+            if (!registry.has(cap)) out.push({ workflow: wf.name, capability: cap });
+        }
     }
-  }
-  return out;
+    return out;
 }
 
 // Built-in capabilities the CLI adapters in src/tools enforce via requireCapability().
