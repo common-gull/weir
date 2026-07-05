@@ -22,6 +22,13 @@ if (mode === 'hang') {
 } else if (mode === 'oom') {
     const chunks: unknown[] = [];
     for (;;) chunks.push(new Array(1_000_000).fill(7)); // grow RSS → parent SIGKILLs it on the cap
+} else if (mode === 'flood') {
+    const chunk = 'x'.repeat(128 * 1024);
+    // Stream stdout without retaining it: own RSS stays low, so only the parent's output cap stops us.
+    for (;;) {
+        process.stdout.write(chunk);
+        await Bun.sleep(0); // yield so bytes flush to the parent, which trips its cap and SIGKILLs us
+    }
 } else if (mode === 'crash') {
     process.exit(3); // exit non-zero without ever writing an output frame
 } else {

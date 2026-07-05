@@ -51,6 +51,14 @@ test('a runaway child is SIGKILLed on the timeout and the daemon survives', asyn
     expect(1 + 1).toBe(2); // this process is plainly still alive to make the assertion
 });
 
+test('a child that floods stdout is SIGKILLed by the output-size cap', async () => {
+    const start = Date.now();
+    await expect(
+        runProtocol({ argv, input: { mode: 'flood' }, maxOutputBytes: 256 * 1024, timeoutMs: 10_000 }),
+    ).rejects.toThrow(/more than 262144 bytes of output/);
+    expect(Date.now() - start).toBeLessThan(5000);
+});
+
 test('an abort signal kills the child and rejects with its reason', async () => {
     const ac = new AbortController();
     setTimeout(() => ac.abort(new Error('cancelled by caller')), 150);

@@ -2,8 +2,14 @@
 // injected argv. The caller supplies the command line — a local bun shim in tests, a `docker run …`
 // invocation later (C8) — and this module owns the mechanics: marshal the input frame to stdin,
 // stream stderr log lines to `onLog`, collect the single output frame from stdout, and keep the
-// daemon alive by SIGKILLing a runaway child on a hard timeout or an optional RSS cap. It knows
-// nothing about runtimes or containers; argv construction (C3) and Docker wiring (C8) live elsewhere.
+// daemon alive by SIGKILLing a runaway child on a hard timeout, an output-size cap, or an optional
+// RSS cap. It knows nothing about runtimes or containers; argv construction (C3) and Docker wiring
+// (C8) live elsewhere.
+//
+// Both of the child's pipes are bounded, not just its RSS: stderr streams line-by-line (never
+// accumulated) and stdout is read against `maxOutputBytes`. The RSS poll alone can't catch a child
+// that streams unbounded output without retaining it — its own resident memory stays low while it
+// buffers the parent toward an OOM — so the daemon caps stdout directly and SIGKILLs on overflow.
 //
 // The RSS poll reuses src/tools/isolate.ts's soft, portable memory cap (reactive, not enforced by
 // the kernel) that trades a hard guarantee for uniform behavior across OSes — the right call for
@@ -11,6 +17,8 @@
 
 import { readRssBytes } from '../tools/isolate.ts';
 import { decodeOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
+
+const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 
 export interface RunProtocolOpts {
     /** Command line to spawn; `argv[0]` is the executable. Constructed by the caller (C3/C8). */
@@ -25,6 +33,9 @@ export interface RunProtocolOpts {
     memoryMb?: number;
     /** RSS poll interval when `memoryMb` is set (default 150ms). */
     pollMs?: number;
+    /** Hard cap on total stdout bytes before SIGKILL (default 16 MiB). Bounds the output frame the
+     *  RSS cap can't: a child that streams output without retaining it stays under `memoryMb`. */
+    maxOutputBytes?: number;
     /** Receives each stderr line as a log frame; unstructured lines arrive as info-level frames. */
     onLog?: (frame: LogFrame) => void;
 }
@@ -49,6 +60,31 @@ async function pumpLines(stream: ReadableStream<Uint8Array>, onLine: (line: stri
     if (tail) onLine(tail);
 }
 
+/** Read a byte stream to text, but stop and invoke `onOverflow` once accumulated bytes exceed `cap`.
+ *  Bounds stdout the way pumpLines bounds stderr, so an unbounded producer can't buffer the parent
+ *  into an OOM; the accumulated string never grows past `cap` (the overflowing chunk is dropped). */
+async function readCapped(stream: ReadableStream<Uint8Array>, cap: number, onOverflow: () => void): Promise<string> {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    let total = 0;
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > cap) {
+                onOverflow();
+                break;
+            }
+            text += decoder.decode(value, { stream: true });
+        }
+    } finally {
+        reader.releaseLock();
+    }
+    return text + decoder.decode();
+}
+
 function forwardLog(line: string, onLog: (frame: LogFrame) => void): void {
     const frame = parseLogLine(line);
     if (frame) {
@@ -69,6 +105,7 @@ function abortError(signal: AbortSignal): Error {
 export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
     const { argv, input, signal, memoryMb, onLog } = opts;
     const timeoutMs = opts.timeoutMs ?? 30_000;
+    const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
 
     if (argv.length === 0) throw new Error('runProtocol requires a non-empty argv');
     if (signal?.aborted) throw abortError(signal);
@@ -83,7 +120,7 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
         /* the child may have exited before reading stdin */
     }
 
-    let killed: 'timeout' | 'memory' | 'abort' | null = null;
+    let killed: 'timeout' | 'memory' | 'abort' | 'output' | null = null;
     const timer = setTimeout(() => {
         killed = 'timeout';
         proc.kill(9);
@@ -109,12 +146,18 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
     });
 
     try {
-        const stdout = await new Response(proc.stdout).text();
+        const stdout = await readCapped(proc.stdout, maxOutputBytes, () => {
+            killed = 'output';
+            proc.kill(9);
+        });
         const exit = await proc.exited;
         await stderrDone;
 
         if (killed === 'timeout') throw new Error(`protocol runner timed out after ${timeoutMs}ms (killed)`);
         if (killed === 'memory') throw new Error(`protocol runner exceeded ${memoryMb}MB (killed)`);
+        if (killed === 'output') {
+            throw new Error(`protocol runner produced more than ${maxOutputBytes} bytes of output (killed)`);
+        }
         if (killed === 'abort' && signal) throw abortError(signal);
         if (exit !== 0 && stdout.trim() === '') {
             throw new Error(`protocol runner exited ${exit} without an output frame`);
