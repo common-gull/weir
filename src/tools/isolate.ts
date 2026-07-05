@@ -23,7 +23,7 @@ export interface IsolateOpts {
 }
 
 /** Read a process's resident memory in bytes. /proc on Linux; `ps` fallback on other Unix. */
-function readRssBytes(pid: number): number {
+export function readRssBytes(pid: number): number {
     try {
         const resident = Number(readFileSync(`/proc/${pid}/statm`, 'utf8').trim().split(/\s+/)[1]);
         if (Number.isFinite(resident)) return resident * 4096;
