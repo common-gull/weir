@@ -175,24 +175,30 @@ function jsonLossReasonAt(v: unknown, seen: Set<object>): string | null {
     if (t !== 'object') return `a ${t}`;
     const o = v as object;
     if (seen.has(o)) return 'a circular reference';
-    seen.add(o);
     if (o instanceof Map) return 'a Map';
     if (o instanceof Set) return 'a Set';
-    if (Array.isArray(o)) {
-        for (const item of o) {
-            const r = jsonLossReasonAt(item, seen);
+    // Track only the ancestors on the current path so shared (DAG) references — the same object
+    // reached twice via sibling fields — aren't misread as cycles; unwind on the way back out.
+    seen.add(o);
+    try {
+        if (Array.isArray(o)) {
+            for (const item of o) {
+                const r = jsonLossReasonAt(item, seen);
+                if (r) return r;
+            }
+            return null;
+        }
+        // Plain object (Date → ISO string and class instances keep their data, so both pass).
+        for (const k of Object.keys(o)) {
+            const val = (o as Record<string, unknown>)[k];
+            if (val === undefined) return `an undefined value at "${k}"`;
+            const r = jsonLossReasonAt(val, seen);
             if (r) return r;
         }
         return null;
+    } finally {
+        seen.delete(o);
     }
-    // Plain object (Date → ISO string and class instances keep their data, so both pass).
-    for (const k of Object.keys(o)) {
-        const val = (o as Record<string, unknown>)[k];
-        if (val === undefined) return `an undefined value at "${k}"`;
-        const r = jsonLossReasonAt(val, seen);
-        if (r) return r;
-    }
-    return null;
 }
 
 const TERMINAL = `('completed','failed','cancelled','interrupted')`;
