@@ -11,6 +11,10 @@
 
   let { children }: { children: Snippet } = $props();
 
+  // Cap the sidebar list at the newest runs so a busy engine can't grow it unbounded. The run id is
+  // a random UUID (no chronological cursor), so there is deliberately no "load older" paging.
+  const RUN_LIMIT = 50;
+
   let runs = $state<RunSummary[]>([]);
   let fWorkflow = $state('');
   let fStatus = $state('');
@@ -35,7 +39,7 @@
   }
 
   async function loadRuns() {
-    runs = await api.runs({ workflow: fWorkflow || undefined, status: fStatus || undefined });
+    runs = await api.runs({ workflow: fWorkflow || undefined, status: fStatus || undefined, limit: RUN_LIMIT });
   }
 
   async function reload() {
@@ -122,15 +126,20 @@
         {/each}
       </select>
     </div>
-    {#each runs as r (r.id)}
-      <a class="run-row {activeRun === r.id ? 'active' : ''}" href="/runs/{encodeURIComponent(r.id)}">
-        <span class="dot-s s-{r.status}"></span>
-        <span class="wfname">{r.workflow}</span>
-        <span class="time">{fmtAgo(r.created_at)}</span>
-      </a>
-    {:else}
-      <div class="empty">no runs yet</div>
-    {/each}
+    <div class="runs">
+      {#each runs as r (r.id)}
+        <a class="run-row {activeRun === r.id ? 'active' : ''}" href="/runs/{encodeURIComponent(r.id)}">
+          <span class="dot-s s-{r.status}"></span>
+          <span class="wfname">{r.workflow}</span>
+          <span class="time">{fmtAgo(r.created_at)}</span>
+        </a>
+      {:else}
+        <div class="empty">no runs yet</div>
+      {/each}
+      {#if runs.length >= RUN_LIMIT}
+        <div class="runs-hint">showing latest {RUN_LIMIT}</div>
+      {/if}
+    </div>
   </div>
 
   <div class="main">

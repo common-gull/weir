@@ -21,10 +21,11 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 export const api = {
     workflows: () => get<WorkflowSummary[]>('/workflows'),
     schedules: () => get<unknown[]>('/schedules'),
-    runs: (q: { workflow?: string; status?: string } = {}) => {
+    runs: (q: { workflow?: string; status?: string; limit?: number } = {}) => {
         const p = new URLSearchParams();
         if (q.workflow) p.set('workflow', q.workflow);
         if (q.status) p.set('status', q.status);
+        if (q.limit != null) p.set('limit', String(q.limit));
         return get<RunSummary[]>(`/runs?${p}`);
     },
     run: (id: string) => get<RunDetail>(`/runs/${id}`),
