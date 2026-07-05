@@ -244,9 +244,13 @@ pre.block { background: var(--parchment); border: 1px solid var(--rule); border-
     /* Opaque paper under the sidebar tint so scrimmed content never bleeds through the drawer. */
     background: linear-gradient(var(--sidebar-tint), var(--sidebar-tint)), var(--paper);
     transform: translateX(-100%);
-    transition: transform 0.1s;
+    /* Off-canvas while closed: visibility:hidden pulls the drawer's nav links out of the tab order
+       and the a11y tree — translateX alone leaves them focusable behind visible content. It flips
+       visible instantly on open and holds through the slide-out on close, so the anim is preserved. */
+    visibility: hidden;
+    transition: transform 0.1s, visibility 0.1s;
   }
-  .app.drawer-open .sidebar { transform: translateX(0); }
+  .app.drawer-open .sidebar { transform: translateX(0); visibility: visible; }
 
   .scrim {
     display: block;

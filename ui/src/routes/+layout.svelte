@@ -21,6 +21,10 @@
   let reloading = $state(false);
   let drawerOpen = $state(false);
 
+  // Below 900px the sidebar is a modal off-canvas drawer; at/above it's the docked column. Mirror
+  // the CSS breakpoint here so the drawer is only treated as modal when it actually behaves that way.
+  let narrow = $state(false);
+
   let theme = $state((document.documentElement.dataset.theme ?? 'light') as 'light' | 'dark');
 
   // Active selection derives from the URL, so deep links and back/forward light up the right row.
@@ -91,6 +95,19 @@
     page.url.pathname;
     drawerOpen = false;
   });
+
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 900px)');
+    const sync = () => {
+      narrow = mq.matches;
+      // Re-docking the sidebar at wide widths must drop any lingering open state, else .main below
+      // would stay inert on a layout where the drawer isn't modal (and the hamburger is hidden).
+      if (!narrow) drawerOpen = false;
+    };
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
 </script>
 
 <div class="app {drawerOpen ? 'drawer-open' : ''}">
@@ -159,7 +176,9 @@
     </div>
   </div>
 
-  <div class="main">
+  <!-- While the modal drawer is open, the page behind the scrim is inert so Tab can't escape the
+       drawer into the dimmed background (inert also hides it from assistive tech). -->
+  <div class="main" inert={narrow && drawerOpen}>
     {@render children()}
   </div>
 </div>
