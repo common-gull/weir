@@ -1,5 +1,7 @@
 // Shared types for the weir engine.
 
+import type { LocalStepSpec } from './exec/runtime.ts';
+
 export type RunStatus =
     | 'queued'
     | 'running'
@@ -12,8 +14,9 @@ export type RunStatus =
 /** A step memo row is terminal: it either completed (result stored) or failed (error stored). */
 export type StepStatus = 'completed' | 'failed' | 'discarded';
 
-/** What kind of ctx primitive produced a memo row. */
-export type StepKind = 'step' | 'now' | 'random' | 'uuid' | 'child' | 'approval' | 'once';
+/** What kind of ctx primitive produced a memo row. `exec` is a step dispatched to the exec runtime
+ *  (a subprocess) rather than an in-process closure. */
+export type StepKind = 'step' | 'exec' | 'now' | 'random' | 'uuid' | 'child' | 'approval' | 'once';
 
 export type Overlap = 'skip' | 'queue' | 'cancel-previous';
 export type Catchup = 'skip' | 'catchup_once' | 'backfill';
@@ -44,7 +47,13 @@ export interface StepOpts<T = unknown> {
     repeat?: RepeatOpts<T>;
     timeout?: number; // ms
     pool?: string; // resource pool to acquire
+    input?: unknown; // payload for a spec step — marshalled into the exec runtime's input frame
 }
+
+/** Routes a step to the exec runtime (a subprocess speaking the stdio protocol) instead of an
+ *  in-process closure. `ctx.step(name, spec, { input })` builds the runtime's argv, runs the module,
+ *  and memoizes its JSON result exactly like a closure step. */
+export type StepSpec = LocalStepSpec;
 
 export interface LoopOpts<T = unknown> {
     max: number; // required hard cap — no infinite loops
@@ -79,6 +88,9 @@ export interface Ctx {
     readonly capabilities: ReadonlySet<Capability>;
 
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
+    /** Spec form: route the step to the exec runtime (a subprocess) rather than running a closure
+     *  in-process. Discriminated from the closure form by `typeof arg2 !== 'function'`. */
+    step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
     /** Like `step`, but runs the closure in-process on the host with full daemon privileges (no
      *  isolation). Gated on the 'host-exec' capability; identical memo/replay/retry semantics. */
     runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;

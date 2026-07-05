@@ -14,6 +14,8 @@
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
 import { requireCapability, withCapabilities } from './capabilities.ts';
+import { buildArgv } from './exec/runtime.ts';
+import { runProtocol } from './exec/spawn.ts';
 import {
     SkipSignal,
     type Capability,
@@ -25,6 +27,7 @@ import {
     type StepKind,
     type StepOpts,
     type StepRow,
+    type StepSpec,
     type WorkflowOpts,
 } from './types.ts';
 
@@ -385,13 +388,42 @@ function buildCtx(
         }));
     };
 
+    // Exec-runtime step (rung-1): run the module in a subprocess (C2) via a runtime-specific argv
+    // (C3) instead of an in-process closure. Streamed log lines surface as step.log events like the
+    // closure step's log channel. JSON result only.
+    async function runExecStep<T>(seq: number, spec: StepSpec, opts: StepOpts<T>): Promise<T> {
+        const out = await runProtocol({
+            argv: buildArgv(spec),
+            input: opts.input,
+            signal,
+            timeoutMs: opts.timeout,
+            onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
+        });
+        if (!out.ok) throw new Error(out.error);
+        return out.result as T;
+    }
+
+    const execStepImpl = <T>(name: string, spec: StepSpec, opts: StepOpts<T>): Promise<T> => {
+        const ord = bump(state.ordinals, name);
+        const key = opts.key ?? `${name}#${ord}`;
+        return memoized<T>('exec', name, key, async (seq) => ({ value: await runExecStep<T>(seq, spec, opts) }));
+    };
+
+    // `ctx.step` overload dispatch: a closure runs in-process (unchanged); a spec routes to the exec
+    // runtime. Discriminated by `typeof arg2 === 'function'`.
+    const stepDispatch = <T>(
+        name: string,
+        arg2: ((s: StepCtx) => T | Promise<T>) | StepSpec,
+        opts: StepOpts<T> = {},
+    ): Promise<T> => (typeof arg2 === 'function' ? stepImpl(name, arg2, opts) : execStepImpl(name, arg2, opts));
+
     const ctx: Ctx = {
         runId,
         workflow: def.name,
         input,
         capabilities: caps,
 
-        step: (name, fn, opts) => stepImpl(name, fn, opts),
+        step: stepDispatch,
 
         // The host escape hatch: identical in-process execution to `step`, gated loudly on
         // 'host-exec'. The gate runs before any seq is consumed, so a denied call throws without

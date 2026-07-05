@@ -1,4 +1,5 @@
 import { expect, test, beforeEach } from 'bun:test';
+import { fileURLToPath } from 'node:url';
 import { openDb, type DB } from './db.ts';
 import { clearRegistry, defineWorkflow, executeRun } from './engine.ts';
 import { approveRun, createRun, retryRun } from './runs.ts';
@@ -8,6 +9,8 @@ beforeEach(() => {
     db = openDb(':memory:');
     clearRegistry();
 });
+
+const nodeStep = fileURLToPath(new URL('./exec/testdata/node-step.ts', import.meta.url));
 
 const stepNames = (runId: string) =>
     (db.query(`SELECT key FROM steps WHERE run_id = ? ORDER BY seq`).all(runId) as { key: string }[]).map((r) => r.key);
@@ -287,6 +290,56 @@ test('loop it.runUnsafelyOnHost: granted -> per-iteration key identical to it.st
     // Same key shape as it.step, so migrating it.step -> it.runUnsafelyOnHost is replay-stable.
     expect(stepNames(id)).toEqual(['loop#0:0:try', 'loop#0:1:try', 'loop#0:2:try']);
 });
+
+test('ctx.step spec: runs a node module in a subprocess and memoizes its JSON result', async () => {
+    defineWorkflow('exec', {}, async (ctx) =>
+        ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 42 } }),
+    );
+    const id = createRun(db, 'exec');
+    expect(await executeRun(db, id)).toBe('completed');
+
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({ echoed: { n: 42 }, from: 'node' });
+
+    // Memoized under the 'exec' kind with the same key shape as a closure step.
+    const step = db.query(`SELECT kind, key FROM steps WHERE run_id = ?`).get(id) as { kind: string; key: string };
+    expect(step).toEqual({ kind: 'exec', key: 'run-node#0' });
+
+    // Container logs (console.warn in the module) surface as step.log events.
+    const logs = db.query(`SELECT message FROM events WHERE run_id = ? AND type = 'step.log'`).all(id) as {
+        message: string;
+    }[];
+    expect(logs.some((l) => l.message === 'heads up')).toBe(true);
+}, 15_000);
+
+test('ctx.step spec: a retry replays the memoized exec result without re-running the subprocess', async () => {
+    let boom = true;
+    defineWorkflow('exec', {}, async (ctx) => {
+        const r = await ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 1 } });
+        await ctx.step('after', () => {
+            if (boom) throw new Error('boom');
+            return 2;
+        });
+        return r;
+    });
+    const id = createRun(db, 'exec');
+    expect(await executeRun(db, id)).toBe('failed'); // exec step runs once, then `after` throws
+
+    const logCount = () =>
+        (db.query(`SELECT count(*) AS c FROM events WHERE run_id = ? AND type = 'step.log'`).get(id) as { c: number })
+            .c;
+    const before = logCount();
+    expect(before).toBeGreaterThan(0);
+
+    boom = false;
+    retryRun(db, id);
+    expect(await executeRun(db, id)).toBe('completed');
+
+    // No new subprocess ran — the exec memo replayed, so no fresh step.log events were emitted.
+    expect(logCount()).toBe(before);
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({ echoed: { n: 1 }, from: 'node' });
+}, 20_000);
 
 test('retryRun --from matches step names exactly (no substring over-delete)', async () => {
     const ran: string[] = [];
