@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS runs (
   finished_at     INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_runs_status ON runs(status);
+CREATE INDEX IF NOT EXISTS ix_runs_created ON runs(created_at);
 CREATE INDEX IF NOT EXISTS ix_runs_workflow ON runs(workflow, created_at);
 CREATE INDEX IF NOT EXISTS ix_runs_parent ON runs(parent_run_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_runs_child ON runs(parent_run_id, parent_seq)
