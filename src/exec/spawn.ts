@@ -6,10 +6,11 @@
 // RSS cap. It knows nothing about runtimes or containers; argv construction (C3) and Docker wiring
 // (C8) live elsewhere.
 //
-// Both of the child's pipes are bounded, not just its RSS: stderr streams line-by-line (never
-// accumulated) and stdout is read against `maxOutputBytes`. The RSS poll alone can't catch a child
-// that streams unbounded output without retaining it — its own resident memory stays low while it
-// buffers the parent toward an OOM — so the daemon caps stdout directly and SIGKILLs on overflow.
+// Both of the child's pipes are bounded, not just its RSS: stderr streams line-by-line — a
+// newline-less line is flushed once it crosses `maxStderrLineBytes`, so the parent's line buffer
+// can't grow without bound — and stdout is read against `maxOutputBytes`. The RSS poll alone can't
+// catch a child that streams unbounded output without retaining it — its own resident memory stays
+// low while it buffers the parent toward an OOM — so the daemon caps both pipes directly.
 //
 // The RSS poll reuses src/tools/isolate.ts's soft, portable memory cap (reactive, not enforced by
 // the kernel) that trades a hard guarantee for uniform behavior across OSes — the right call for
@@ -19,6 +20,7 @@ import { readRssBytes } from '../tools/isolate.ts';
 import { decodeOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
 
 const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_STDERR_LINE_BYTES = 1024 * 1024;
 
 export interface RunProtocolOpts {
     /** Command line to spawn; `argv[0]` is the executable. Constructed by the caller (C3/C8). */
@@ -36,12 +38,21 @@ export interface RunProtocolOpts {
     /** Hard cap on total stdout bytes before SIGKILL (default 16 MiB). Bounds the output frame the
      *  RSS cap can't: a child that streams output without retaining it stays under `memoryMb`. */
     maxOutputBytes?: number;
+    /** Per-line cap on the stderr buffer (default 1 MiB). A newline-less line is flushed once it
+     *  crosses this, so a runaway or adversarial child can't grow the parent's buffer without bound. */
+    maxStderrLineBytes?: number;
     /** Receives each stderr line as a log frame; unstructured lines arrive as info-level frames. */
     onLog?: (frame: LogFrame) => void;
 }
 
-/** Split a byte stream into lines and hand each to `onLine` (a trailing partial line is emitted too). */
-async function pumpLines(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void): Promise<void> {
+/** Split a byte stream into lines and hand each to `onLine` (a trailing partial line is emitted too).
+ *  A newline-less line is flushed once it grows past `maxLineBytes`, so the buffer stays bounded and
+ *  an adversarial child can't buffer the parent toward an OOM. */
+async function pumpLines(
+    stream: ReadableStream<Uint8Array>,
+    maxLineBytes: number,
+    onLine: (line: string) => void,
+): Promise<void> {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -54,6 +65,10 @@ async function pumpLines(stream: ReadableStream<Uint8Array>, onLine: (line: stri
             onLine(buf.slice(0, nl));
             buf = buf.slice(nl + 1);
             nl = buf.indexOf('\n');
+        }
+        if (buf.length > maxLineBytes) {
+            onLine(buf);
+            buf = '';
         }
     }
     const tail = buf + decoder.decode();
@@ -106,6 +121,7 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
     const { argv, input, signal, memoryMb, onLog } = opts;
     const timeoutMs = opts.timeoutMs ?? 30_000;
     const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    const maxStderrLineBytes = opts.maxStderrLineBytes ?? DEFAULT_MAX_STDERR_LINE_BYTES;
 
     if (argv.length === 0) throw new Error('runProtocol requires a non-empty argv');
     if (signal?.aborted) throw abortError(signal);
@@ -141,7 +157,7 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
     signal?.addEventListener('abort', onAbort, { once: true });
 
     // Always drain stderr, even without an onLog, so a chatty child can't deadlock on a full pipe.
-    const stderrDone = pumpLines(proc.stderr, (line) => {
+    const stderrDone = pumpLines(proc.stderr, maxStderrLineBytes, (line) => {
         if (onLog) forwardLog(line, onLog);
     });
 
@@ -164,6 +180,9 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
         }
         return decodeOutput(stdout);
     } finally {
+        // Guarantee no orphan survives an untracked stream error (e.g. reader.read() throwing for a
+        // reason none of the `killed` causes cover); a no-op once the child has already exited.
+        proc.kill(9);
         clearTimeout(timer);
         if (poll) clearInterval(poll);
         signal?.removeEventListener('abort', onAbort);

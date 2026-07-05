@@ -39,6 +39,22 @@ test('raw stderr diagnostics surface as info frames rather than being dropped', 
     expect(logs).toEqual([{ level: 'info', message: 'raw diagnostic, not a protocol frame' }]);
 });
 
+test('a huge newline-less stderr line is flushed in bounded chunks, not accumulated whole', async () => {
+    const logs: LogFrame[] = [];
+    const out = await runProtocol({
+        argv,
+        input: { mode: 'stderr-bigline' },
+        timeoutMs: 10_000,
+        maxStderrLineBytes: 16 * 1024,
+        onLog: (f) => logs.push(f),
+    });
+    expect(out).toEqual({ ok: true, result: 'done' });
+    // Arrives as several flushed frames, so the parent's buffer never held the whole line, and
+    // nothing is dropped: the pieces reconstruct the original.
+    expect(logs.length).toBeGreaterThan(1);
+    expect(logs.map((f) => f.message).join('')).toBe('e'.repeat(8 * 32 * 1024));
+});
+
 test('a failed output frame is returned, not thrown', async () => {
     const out = await runProtocol({ argv, input: { mode: 'fail', message: 'boom' }, timeoutMs: 10_000 });
     expect(out).toEqual({ ok: false, error: 'boom' });

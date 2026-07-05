@@ -29,6 +29,15 @@ if (mode === 'hang') {
         process.stdout.write(chunk);
         await Bun.sleep(0); // yield so bytes flush to the parent, which trips its cap and SIGKILLs us
     }
+} else if (mode === 'stderr-bigline') {
+    // Stream one newline-less line in chunks over time: the parent must flush each read, not
+    // accumulate the whole line, so its buffer can't grow without bound.
+    const chunk = 'e'.repeat(32 * 1024);
+    for (let i = 0; i < 8; i++) {
+        process.stderr.write(chunk);
+        await Bun.sleep(0); // yield so each chunk reaches the parent as its own read
+    }
+    process.stdout.write(encodeOutput({ ok: true, result: 'done' }));
 } else if (mode === 'crash') {
     process.exit(3); // exit non-zero without ever writing an output frame
 } else {
