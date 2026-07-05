@@ -3,6 +3,7 @@
   import { api } from '$lib/api/client';
   import { subscribe } from '$lib/api/sse';
   import { fmtAgo } from '$lib/format';
+  import { loadWorkflows } from '$lib/workflows/store.svelte';
   import type { WorkflowSummary } from '$lib/workflows/types';
   import type { RunSummary } from '$lib/runs/types';
   import type { EventRow } from '$lib/events/types';
@@ -16,6 +17,18 @@
 
   async function loadRuns() {
     runs = await api.runs({ workflow: workflow.name });
+  }
+
+  // Run a pause/resume call, then refetch the shared workflow list so the badge/button flip
+  // immediately (the `schedule.*` SSE event does the same for other open tabs — see +layout.svelte).
+  async function act(fn: () => Promise<unknown>) {
+    error = null;
+    try {
+      await fn();
+      await loadWorkflows();
+    } catch (e) {
+      error = `Action failed — ${(e as Error).message}`;
+    }
   }
 
   async function start() {
@@ -62,6 +75,18 @@
   <span class="dot-s s-{workflow.lastRun?.status ?? 'idle'}"></span>
   <h1>{workflow.name}</h1>
   <span class="badge">{workflow.schedule ? workflow.schedule.cron : 'manual'}</span>
+  {#if workflow.schedule}
+    {#if workflow.schedulePaused}
+      <span class="badge paused">schedule paused</span>
+      <button type="button" class="btn sm" onclick={() => act(() => api.resumeWorkflow(workflow.name))}>
+        ▶ Resume schedule
+      </button>
+    {:else}
+      <button type="button" class="btn sm" onclick={() => act(() => api.pauseWorkflow(workflow.name))}>
+        ⏸ Pause schedule
+      </button>
+    {/if}
+  {/if}
 </div>
 <div class="subtle">
   {workflow.capabilities.length ? workflow.capabilities.join(', ') : 'no capabilities'} · priority {workflow.priority}

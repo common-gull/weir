@@ -60,6 +60,9 @@
       if (e.type.startsWith('run.') && e.type !== 'run.log') {
         loadRuns();
         loadWorkflows();
+      } else if (e.type.startsWith('schedule.')) {
+        // pause/resume (and reload's schedule sync) change the workflow summaries, not the run list.
+        loadWorkflows();
       }
     });
     // The SSE subscription above already refetches on run lifecycle events, so no fast poll is
@@ -99,7 +102,9 @@
           <span class="chev">›</span>
         </div>
         <div class="meta">
-          {w.schedule ? w.schedule.cron : 'manual'}{w.capabilities.length ? ` · ${w.capabilities.join(',')}` : ''}
+          {w.schedule ? w.schedule.cron : 'manual'}{w.schedulePaused ? ' · paused' : ''}{w.capabilities.length
+            ? ` · ${w.capabilities.join(',')}`
+            : ''}
         </div>
       </a>
     {/each}

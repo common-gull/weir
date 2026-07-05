@@ -260,6 +260,16 @@ test('resumeWorkflow returns false and emits nothing when nothing is paused', ()
     expect(db.query(`SELECT COUNT(*) AS c FROM events WHERE type = 'schedule.resumed'`).get()).toEqual({ c: 0 });
 });
 
+test('manual runs still work while the schedule is paused', () => {
+    const clock = T0;
+    defineWorkflow('w', { schedule: { cron: '* * * * *' } }, async () => 1);
+    const s = new Scheduler(db, undefined, () => clock);
+    s.syncFromRegistry();
+    s.pauseWorkflow('w');
+    createRun(db, 'w'); // the Start run / `weir run` path bypasses the scheduler entirely
+    expect(runCount('w')).toBe(1);
+});
+
 test('no drift: next_fire_at stays aligned to the cron grid', () => {
     let clock = T0;
     defineWorkflow('w', { schedule: { cron: '*/5 * * * *' } }, async () => 1);
