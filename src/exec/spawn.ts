@@ -1,0 +1,128 @@
+// Runtime-agnostic subprocess runner that speaks the C1 stdio protocol (src/exec/protocol.ts) to an
+// injected argv. The caller supplies the command line — a local bun shim in tests, a `docker run …`
+// invocation later (C8) — and this module owns the mechanics: marshal the input frame to stdin,
+// stream stderr log lines to `onLog`, collect the single output frame from stdout, and keep the
+// daemon alive by SIGKILLing a runaway child on a hard timeout or an optional RSS cap. It knows
+// nothing about runtimes or containers; argv construction (C3) and Docker wiring (C8) live elsewhere.
+//
+// The RSS poll reuses src/tools/isolate.ts's soft, portable memory cap (reactive, not enforced by
+// the kernel) that trades a hard guarantee for uniform behavior across OSes — the right call for
+// buggy, not hostile, code.
+
+import { readRssBytes } from '../tools/isolate.ts';
+import { decodeOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
+
+export interface RunProtocolOpts {
+    /** Command line to spawn; `argv[0]` is the executable. Constructed by the caller (C3/C8). */
+    argv: string[];
+    /** Value marshalled into the C1 input frame on the child's stdin. */
+    input: unknown;
+    /** Aborts the run and SIGKILLs the child; the returned promise rejects with the signal's reason. */
+    signal?: AbortSignal;
+    /** Hard wall-clock limit before SIGKILL (default 30s). */
+    timeoutMs?: number;
+    /** Soft RSS cap in MB; when the child's resident memory crosses it, SIGKILL. */
+    memoryMb?: number;
+    /** RSS poll interval when `memoryMb` is set (default 150ms). */
+    pollMs?: number;
+    /** Receives each stderr line as a log frame; unstructured lines arrive as info-level frames. */
+    onLog?: (frame: LogFrame) => void;
+}
+
+/** Split a byte stream into lines and hand each to `onLine` (a trailing partial line is emitted too). */
+async function pumpLines(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void): Promise<void> {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl = buf.indexOf('\n');
+        while (nl !== -1) {
+            onLine(buf.slice(0, nl));
+            buf = buf.slice(nl + 1);
+            nl = buf.indexOf('\n');
+        }
+    }
+    const tail = buf + decoder.decode();
+    if (tail) onLine(tail);
+}
+
+function forwardLog(line: string, onLog: (frame: LogFrame) => void): void {
+    const frame = parseLogLine(line);
+    if (frame) {
+        onLog(frame);
+    } else if (line.trim()) {
+        // Raw diagnostics (stack traces, tool chatter) aren't dropped — surface them at info level.
+        onLog({ level: 'info', message: line });
+    }
+}
+
+function abortError(signal: AbortSignal): Error {
+    return signal.reason instanceof Error ? signal.reason : new Error('protocol runner aborted');
+}
+
+/** Spawn `argv`, exchange one input frame for one output frame over the C1 protocol, and return the
+ *  decoded output envelope. Rejects instead when the child never speaks the protocol: SIGKILLed on
+ *  the timeout or RSS cap, aborted via `signal`, or exited without a frame. */
+export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
+    const { argv, input, signal, memoryMb, onLog } = opts;
+    const timeoutMs = opts.timeoutMs ?? 30_000;
+
+    if (argv.length === 0) throw new Error('runProtocol requires a non-empty argv');
+    if (signal?.aborted) throw abortError(signal);
+
+    const inputFrame = encodeInput(input); // may throw ProtocolError for non-JSON input — before we spawn
+
+    const proc = Bun.spawn(argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    try {
+        proc.stdin.write(inputFrame);
+        proc.stdin.end();
+    } catch {
+        /* the child may have exited before reading stdin */
+    }
+
+    let killed: 'timeout' | 'memory' | 'abort' | null = null;
+    const timer = setTimeout(() => {
+        killed = 'timeout';
+        proc.kill(9);
+    }, timeoutMs);
+    const memoryBytes = (memoryMb ?? 0) * 1024 * 1024;
+    const poll = memoryMb
+        ? setInterval(() => {
+              if (readRssBytes(proc.pid) > memoryBytes) {
+                  killed = 'memory';
+                  proc.kill(9);
+              }
+          }, opts.pollMs ?? 150)
+        : undefined;
+    const onAbort = () => {
+        killed = 'abort';
+        proc.kill(9);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    // Always drain stderr, even without an onLog, so a chatty child can't deadlock on a full pipe.
+    const stderrDone = pumpLines(proc.stderr, (line) => {
+        if (onLog) forwardLog(line, onLog);
+    });
+
+    try {
+        const stdout = await new Response(proc.stdout).text();
+        const exit = await proc.exited;
+        await stderrDone;
+
+        if (killed === 'timeout') throw new Error(`protocol runner timed out after ${timeoutMs}ms (killed)`);
+        if (killed === 'memory') throw new Error(`protocol runner exceeded ${memoryMb}MB (killed)`);
+        if (killed === 'abort' && signal) throw abortError(signal);
+        if (exit !== 0 && stdout.trim() === '') {
+            throw new Error(`protocol runner exited ${exit} without an output frame`);
+        }
+        return decodeOutput(stdout);
+    } finally {
+        clearTimeout(timer);
+        if (poll) clearInterval(poll);
+        signal?.removeEventListener('abort', onAbort);
+    }
+}
