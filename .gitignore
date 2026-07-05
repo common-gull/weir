@@ -132,3 +132,4 @@ lib/*
 !lib/README.md
 
 .idea
+local-docs
