@@ -155,6 +155,7 @@ body::before {
 .s-running { color: var(--run); animation: pulse 1.1s infinite; }
 .s-queued { color: var(--idle); }
 .s-awaiting-approval { color: var(--wait); }
+.s-paused { color: var(--wait); }   /* amber = "held"; use --idle for a muted look */
 .s-cancelled { color: var(--idle); }
 .s-idle { color: var(--idle); }
 .s-interrupted { color: var(--fail); opacity: 0.55; }

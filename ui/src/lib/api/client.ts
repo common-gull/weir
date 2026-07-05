@@ -40,5 +40,7 @@ export const api = {
   runWorkflow: (name: string, input?: unknown) => post<{ id: string }>(`/workflows/${name}/run`, input),
   retry: (id: string, from?: string) => post(`/runs/${id}/retry`, { from }),
   cancel: (id: string) => post(`/runs/${id}/cancel`),
+  pause: (id: string) => post(`/runs/${id}/pause`),
+  resume: (id: string) => post(`/runs/${id}/resume`),
   approve: (id: string, gate = 'human') => post(`/runs/${id}/approve`, { gate }),
 };

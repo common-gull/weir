@@ -22,6 +22,7 @@
   // Events that change run/step status and warrant a detail refetch (lifecycle + attempts).
   const RELOAD_ON = new Set([
     'run.started', 'run.completed', 'run.failed', 'run.parked', 'run.cancelled', 'run.skipped',
+    'run.paused', 'run.resumed',
     'step.attempt', 'step.retry',
   ]);
 
@@ -111,6 +112,12 @@
     <button class="btn" onclick={() => act(() => api.retry(id))}>↻ Retry</button>
     {#if run.status === 'running' || run.status === 'queued'}
       <button class="btn" onclick={() => act(() => api.cancel(id))}>✕ Cancel</button>
+    {/if}
+    {#if run.status === 'queued'}
+      <button class="btn" onclick={() => act(() => api.pause(id))}>⏸ Pause</button>
+    {/if}
+    {#if run.status === 'paused'}
+      <button class="btn" onclick={() => act(() => api.resume(id))}>▶ Resume</button>
     {/if}
     {#if run.status === 'awaiting-approval'}
       <button class="btn" onclick={() => act(() => api.approve(id))}>✓ Approve</button>

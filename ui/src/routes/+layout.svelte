@@ -112,7 +112,7 @@
       </select>
       <select bind:value={fStatus}>
         <option value="">any status</option>
-        {#each ['queued', 'running', 'completed', 'failed', 'awaiting-approval', 'cancelled', 'interrupted'] as s}
+        {#each ['queued', 'running', 'paused', 'completed', 'failed', 'awaiting-approval', 'cancelled', 'interrupted'] as s}
           <option value={s}>{s}</option>
         {/each}
       </select>
