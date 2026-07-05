@@ -10,7 +10,7 @@ import type { Scheduler } from '../scheduler.ts';
 import { allWorkflows } from '../engine.ts';
 import { knownCapabilities } from '../capabilities.ts';
 import { loadWorkflows } from '../loader.ts';
-import { approveRun, createRun, retryRun } from '../runs.ts';
+import { approveRun, createRun, pauseRun, resumeRun, retryRun } from '../runs.ts';
 
 export interface ServerDeps {
   db: DB;
@@ -212,8 +212,34 @@ export function createServer(deps: ServerDeps) {
 
   on('POST', /^\/api\/runs\/([^/]+)\/approve$/, async (req, m) => {
     const body = (await req.json().catch(() => ({}))) as { gate?: string; payload?: unknown };
-    approveRun(db, m[1]!, body.gate, body.payload);
+    // Bad-state guards throw (e.g. run not awaiting approval) — surface as 409, not a 500.
+    try {
+      approveRun(db, m[1]!, body.gate, body.payload);
+    } catch (e) {
+      return json({ error: (e as Error).message }, 409);
+    }
     executor.wake();
+    return json({ ok: true });
+  });
+
+  on('POST', /^\/api\/runs\/([^/]+)\/pause$/, (_req, m) => {
+    // Throws if the run has already left the queue ("not queued"); surface as 409, not a 500.
+    try {
+      pauseRun(db, m[1]!);
+    } catch (e) {
+      return json({ error: (e as Error).message }, 409);
+    }
+    return json({ ok: true });
+  });
+
+  on('POST', /^\/api\/runs\/([^/]+)\/resume$/, (_req, m) => {
+    // Throws if the run isn't paused ("not paused"); surface as 409, not a 500.
+    try {
+      resumeRun(db, m[1]!);
+    } catch (e) {
+      return json({ error: (e as Error).message }, 409);
+    }
+    executor.wake(); // claim immediately rather than waiting for the ~1s poll
     return json({ ok: true });
   });
 

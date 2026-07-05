@@ -4,6 +4,7 @@ export type RunStatus =
   | 'queued'
   | 'running'
   | 'awaiting-approval'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'cancelled'

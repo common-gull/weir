@@ -1,4 +1,4 @@
-// Run lifecycle helpers (create / retry / approve) shared by the executor, CLI, and API.
+// Run lifecycle helpers (create / retry / approve / pause / resume) shared by the executor, CLI, and API.
 
 import type { DB } from './db.ts';
 import { emit, toJson } from './db.ts';
@@ -97,4 +97,26 @@ export function approveRun(db: DB, runId: string, gate?: string, payload?: unkno
   db.query(`UPDATE runs SET status = 'queued' WHERE id = ? AND status = 'awaiting-approval'`).run(runId);
   db.query(`DELETE FROM kv WHERE namespace = '__pending__' AND key = ?`).run(runId);
   emit(db, { runId, type: 'run.approved', message: g });
+}
+
+/** Hold a queued run so the executor won't claim it. Only a still-queued run can be paused. */
+export function pauseRun(db: DB, runId: string): void {
+  const run = db.query(`SELECT status FROM runs WHERE id = ?`).get(runId) as { status: string } | null;
+  if (!run) throw new Error(`run not found: ${runId}`);
+  if (run.status !== 'queued') {
+    throw new Error(`run ${runId} is ${run.status}, not queued`);
+  }
+  db.query(`UPDATE runs SET status = 'paused' WHERE id = ? AND status = 'queued'`).run(runId);
+  emit(db, { runId, type: 'run.paused' });
+}
+
+/** Re-queue a paused run so the executor can claim it again. Only a paused run can be resumed. */
+export function resumeRun(db: DB, runId: string): void {
+  const run = db.query(`SELECT status FROM runs WHERE id = ?`).get(runId) as { status: string } | null;
+  if (!run) throw new Error(`run not found: ${runId}`);
+  if (run.status !== 'paused') {
+    throw new Error(`run ${runId} is ${run.status}, not paused`);
+  }
+  db.query(`UPDATE runs SET status = 'queued' WHERE id = ? AND status = 'paused'`).run(runId);
+  emit(db, { runId, type: 'run.resumed' });
 }
