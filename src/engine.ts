@@ -13,7 +13,7 @@
 
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { withCapabilities } from './capabilities.ts';
+import { requireCapability, withCapabilities } from './capabilities.ts';
 import {
     SkipSignal,
     type Capability,
@@ -392,6 +392,14 @@ function buildCtx(
         capabilities: caps,
 
         step: (name, fn, opts) => stepImpl(name, fn, opts),
+
+        // The host escape hatch: identical in-process execution to `step`, gated loudly on
+        // 'host-exec'. The gate runs before any seq is consumed, so a denied call throws without
+        // touching replay state.
+        runUnsafelyOnHost: (name, fn, opts) => {
+            requireCapability('host-exec');
+            return stepImpl(name, fn, opts);
+        },
 
         loop: async <T>(opts: LoopOpts<T>, bodyFn: (it: LoopCtx) => T | Promise<T>): Promise<T> => {
             const loopId = state.loopOrd++;

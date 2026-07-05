@@ -82,10 +82,12 @@ export function unknownCapabilities(
     return out;
 }
 
-// Built-in capabilities the CLI adapters in src/tools enforce via requireCapability().
+// Built-in capabilities, each enforced via requireCapability() at its one chokepoint: the CLI
+// adapters in src/tools for git/gh, engine.ts's ctx.runUnsafelyOnHost for host-exec.
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
+defineCapability('host-exec', 'run a step in-process on the host with full daemon privileges — no isolation');
 // A conventional capability with no central chokepoint (there's no single place all outbound
 // traffic passes through). Seeded so it's a *known* capability, for a workflow or lib/ tool that
 // gates its own network calls — e.g. lib/slack.ts gates its fetch on its own 'slack' capability.
