@@ -39,4 +39,9 @@ When migrating, split each step by this test: *does it read or mutate the host* 
 touch the filesystem, read env/platform, open a socket)? If yes, it's a host step —
 `runUnsafelyOnHost`, and declare `host-exec`. If no, it stays `ctx.step`.
 
+Inside a `ctx.loop`, the same hatch is loop-scoped: use `it.runUnsafelyOnHost` (the host counterpart
+of `it.step`) for a host-touching iteration step. It keeps `it.step`'s per-iteration namespacing, so
+migrating `it.step` → `it.runUnsafelyOnHost` only adds the `host-exec` gate — the memo key is
+unchanged and an in-flight run still replays.
+
 See `workflows/example.ts` for a tracked, tested demonstration.

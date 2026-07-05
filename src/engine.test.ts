@@ -251,6 +251,43 @@ test('runUnsafelyOnHost: granted -> runs in-process with step-identical memo/rep
     expect(stepNames(id)).toEqual(['a#0', 'b#0']);
 });
 
+test('loop it.runUnsafelyOnHost: denied without host-exec, no seq consumed', async () => {
+    let ran = false;
+    defineWorkflow('loopnohost', {}, async (ctx) => {
+        await ctx.loop({ max: 3, until: () => true }, async (it) => {
+            await it.runUnsafelyOnHost('touch', () => {
+                ran = true;
+                return 1;
+            });
+        });
+        return 'ok';
+    });
+    const id = createRun(db, 'loopnohost');
+    expect(await executeRun(db, id)).toBe('failed');
+    expect(ran).toBe(false); // gate throws before the closure runs
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(run.error).toContain('host-exec');
+    expect(stepNames(id)).toEqual([]);
+});
+
+test('loop it.runUnsafelyOnHost: granted -> per-iteration key identical to it.step', async () => {
+    let attempts = 0;
+    defineWorkflow('loophost', { capabilities: ['host-exec'] }, async (ctx) => {
+        return ctx.loop({ max: 5, until: (r: { ok: boolean }) => r.ok }, async (it) => {
+            const ok = (await it.runUnsafelyOnHost('try', () => {
+                attempts++;
+                return attempts >= 3;
+            })) as boolean;
+            return { ok };
+        });
+    });
+    const id = createRun(db, 'loophost');
+    expect(await executeRun(db, id)).toBe('completed');
+    expect(attempts).toBe(3);
+    // Same key shape as it.step, so migrating it.step -> it.runUnsafelyOnHost is replay-stable.
+    expect(stepNames(id)).toEqual(['loop#0:0:try', 'loop#0:1:try', 'loop#0:2:try']);
+});
+
 test('retryRun --from matches step names exactly (no substring over-delete)', async () => {
     const ran: string[] = [];
     defineWorkflow('t', {}, async (ctx) => {
