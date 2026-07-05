@@ -19,6 +19,7 @@
   let fWorkflow = $state('');
   let fStatus = $state('');
   let reloading = $state(false);
+  let drawerOpen = $state(false);
 
   let theme = $state((document.documentElement.dataset.theme ?? 'light') as 'light' | 'dark');
 
@@ -84,9 +85,25 @@
     fStatus;
     loadRuns();
   });
+
+  // Selecting a nav link navigates, which closes the off-canvas drawer on narrow screens.
+  $effect(() => {
+    page.url.pathname;
+    drawerOpen = false;
+  });
 </script>
 
-<div class="app">
+<div class="app {drawerOpen ? 'drawer-open' : ''}">
+  <button
+    type="button"
+    class="btn sm hamburger"
+    aria-label="Toggle navigation"
+    aria-expanded={drawerOpen}
+    onclick={() => (drawerOpen = !drawerOpen)}
+  >
+    {drawerOpen ? '✕' : '☰'}
+  </button>
+  <button type="button" class="scrim" tabindex="-1" aria-label="Close navigation" onclick={() => (drawerOpen = false)}></button>
   <div class="sidebar">
     <div class="brand">
       <span class="brandname">weir</span>
