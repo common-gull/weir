@@ -109,6 +109,14 @@ CREATE TABLE IF NOT EXISTS events (
   data    TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_events_run ON events(run_id, id);
+
+-- Content-addressed artifact store metadata. Bytes too big for the JSON memo live on disk under
+-- the store dir keyed by their sha256; this row records size + when first stored. See artifacts.ts.
+CREATE TABLE IF NOT EXISTS artifacts (
+  hash       TEXT PRIMARY KEY,
+  size       INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `;
 
 export type DB = Database;
