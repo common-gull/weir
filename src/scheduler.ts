@@ -134,6 +134,36 @@ export class Scheduler {
         if (this.timer) clearInterval(this.timer);
     }
 
+    /**
+     * Stop firing new scheduled runs for a workflow — a pause. Manual runs and any already
+     * queued/running run are unaffected; only future scheduled fires are held. Persists across
+     * reload/restart (`syncFromRegistry`'s UPDATE never touches `enabled`). Returns false when the
+     * workflow has no enabled schedule (nothing to pause). Mirrors `Executor.cancel` living on the
+     * executor.
+     */
+    pauseWorkflow(workflow: string): boolean {
+        const res = this.db.query(`UPDATE schedules SET enabled = 0 WHERE workflow = ? AND enabled = 1`).run(workflow);
+        const changed = (res.changes as number) > 0;
+        if (changed) emit(this.db, { type: 'schedule.paused', message: workflow });
+        return changed;
+    }
+
+    /**
+     * Resume firing for a paused workflow, then tick once so a now-due schedule fires immediately
+     * instead of waiting for the next interval. While paused `next_fire_at` never advanced, so the
+     * tick walks the missed window under the workflow's `catchup` policy (default `skip` → no
+     * backfill flood). Returns false when the workflow has no paused schedule (nothing to resume).
+     */
+    resumeWorkflow(workflow: string): boolean {
+        const res = this.db.query(`UPDATE schedules SET enabled = 1 WHERE workflow = ? AND enabled = 0`).run(workflow);
+        const changed = (res.changes as number) > 0;
+        if (changed) {
+            emit(this.db, { type: 'schedule.resumed', message: workflow });
+            this.tick();
+        }
+        return changed;
+    }
+
     /** Evaluate all due schedules once. Returns the number of runs created. */
     tick(): number {
         const now = this.now();
