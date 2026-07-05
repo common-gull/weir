@@ -239,16 +239,17 @@ export function createServer(deps: ServerDeps) {
 
     // Pause / resume a workflow's cron schedule. Only affects scheduled firing — Start run above and
     // `weir run` are unaffected. The Scheduler owns the enabled flag, so both need it wired up.
+    // `changed` reports whether the flag actually flipped: false means the request was a no-op
+    // (already in that state, or no schedule row for the name), so callers don't read `ok` as
+    // "state applied" when nothing moved.
     on('POST', /^\/api\/workflows\/([^/]+)\/pause$/, (_req, m) => {
         if (!scheduler) return json({ error: 'scheduler unavailable' }, 503);
-        scheduler.pauseWorkflow(seg(m));
-        return json({ ok: true });
+        return json({ ok: true, changed: scheduler.pauseWorkflow(seg(m)) });
     });
 
     on('POST', /^\/api\/workflows\/([^/]+)\/resume$/, (_req, m) => {
         if (!scheduler) return json({ error: 'scheduler unavailable' }, 503);
-        scheduler.resumeWorkflow(seg(m));
-        return json({ ok: true });
+        return json({ ok: true, changed: scheduler.resumeWorkflow(seg(m)) });
     });
 
     on('POST', /^\/api\/runs\/([^/]+)\/retry$/, async (req, m) => {
