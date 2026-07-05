@@ -206,6 +206,51 @@ test('approveRun resumes the parked gate by name and rejects non-parked runs', a
     expect(() => approveRun(db, id)).toThrow(/not awaiting approval/); // completed run can't be re-approved
 });
 
+test('runUnsafelyOnHost: denied without the host-exec capability, naming it', async () => {
+    let ran = false;
+    defineWorkflow('nohost', {}, async (ctx) => {
+        await ctx.runUnsafelyOnHost('touch', () => {
+            ran = true;
+            return 1;
+        });
+        return 'ok';
+    });
+    const id = createRun(db, 'nohost');
+    expect(await executeRun(db, id)).toBe('failed');
+    expect(ran).toBe(false); // gate throws before the closure runs
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(run.error).toContain('host-exec');
+    expect(stepNames(id)).toEqual([]); // no seq consumed on a denied call
+});
+
+test('runUnsafelyOnHost: granted -> runs in-process with step-identical memo/replay', async () => {
+    const ran: string[] = [];
+    let boom = true;
+    defineWorkflow('host', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost('a', () => {
+            ran.push('a');
+            return 1;
+        });
+        await ctx.step('b', () => {
+            ran.push('b');
+            if (boom) throw new Error('boom');
+            return 2;
+        });
+        return 'ok';
+    });
+    const id = createRun(db, 'host');
+    expect(await executeRun(db, id)).toBe('failed');
+    expect(ran).toEqual(['a', 'b']);
+    expect(stepNames(id)).toEqual(['a#0']); // host step memoized like any 'step'
+
+    ran.length = 0;
+    boom = false;
+    retryRun(db, id);
+    expect(await executeRun(db, id)).toBe('completed');
+    expect(ran).toEqual(['b']); // memoized host step replays, does not re-run
+    expect(stepNames(id)).toEqual(['a#0', 'b#0']);
+});
+
 test('retryRun --from matches step names exactly (no substring over-delete)', async () => {
     const ran: string[] = [];
     defineWorkflow('t', {}, async (ctx) => {

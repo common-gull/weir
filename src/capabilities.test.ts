@@ -2,7 +2,7 @@ import { expect, test, beforeEach } from 'bun:test';
 import { openDb, type DB } from './db.ts';
 import { clearRegistry, defineWorkflow, executeRun } from './engine.ts';
 import { createRun } from './runs.ts';
-import { requireCapability, hasCapability } from './capabilities.ts';
+import { requireCapability, hasCapability, knownCapabilities } from './capabilities.ts';
 
 let db: DB;
 beforeEach(() => {
@@ -37,4 +37,8 @@ test('outward action allowed when the workflow declares the capability', async (
     const id = createRun(db, 'grant');
     expect(await executeRun(db, id)).toBe('completed');
     expect(allowed).toBe(true);
+});
+
+test('host-exec is a discoverable built-in capability', () => {
+    expect(knownCapabilities().has('host-exec')).toBe(true);
 });

@@ -61,7 +61,7 @@ export interface ScheduleDef {
     backfillMax?: number;
 }
 
-export type Capability = 'git-push' | 'gh-pr' | 'gh-comment' | 'network' | (string & {});
+export type Capability = 'git-push' | 'gh-pr' | 'gh-comment' | 'network' | 'host-exec' | (string & {});
 
 export interface WorkflowOpts {
     schedule?: ScheduleDef;
@@ -79,6 +79,9 @@ export interface Ctx {
     readonly capabilities: ReadonlySet<Capability>;
 
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
+    /** Like `step`, but runs the closure in-process on the host with full daemon privileges (no
+     *  isolation). Gated on the 'host-exec' capability; identical memo/replay/retry semantics. */
+    runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     loop<T>(opts: LoopOpts<T>, body: (it: LoopCtx) => T | Promise<T>): Promise<T>;
     map<I, O>(
         items: I[],
