@@ -107,7 +107,7 @@ EOF
 ); s2=${s2##*/}
 ```
 
-- Use `--blocked-by "$a $b"` (space-separated) when a slice depends on more than one earlier slice.
+- Use `--blocked-by "$a,$b"` (comma-separated) when a slice depends on more than one earlier slice.
 - **Leave issues unassigned.** The blocked-by graph is the pickup signal: a slice is *ready* when
     it's open and all its blockers are closed. List ready work with
     `gh issue list --state open --json number,title,body` and pick issues with no open blockers.
