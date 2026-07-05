@@ -40,6 +40,10 @@ test('assertSerializable rejects values JSON would silently drop, and passes pla
     expect(() => assertSerializable(new Map([['a', 1]]), 's')).toThrow(/Map/);
     expect(() => assertSerializable({ n: new Set([1]) }, 's')).toThrow(/Set/);
     expect(() => assertSerializable({ n: 1n }, 's')).toThrow(/bigint/);
+    // NaN/Infinity are numbers JSON.stringify silently turns into null — must be rejected, not passed
+    expect(() => assertSerializable(NaN, 's')).toThrow(/non-finite/);
+    expect(() => assertSerializable({ r: Infinity }, 's')).toThrow(/non-finite/);
+    expect(() => assertSerializable([-Infinity], 's')).toThrow(/non-finite/);
     // plain JSON (incl. Date → ISO string, nested arrays/objects) passes
     expect(() => assertSerializable({ a: 1, b: [1, 'x', { c: true }], d: new Date(0) }, 's')).not.toThrow();
     expect(() => assertSerializable(undefined, 's')).not.toThrow(); // "no result" is fine

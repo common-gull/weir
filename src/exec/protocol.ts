@@ -8,10 +8,11 @@
 //
 // Pure encode/decode only: no spawning, no argv, no runtime knowledge. A runtime in any language
 // can implement it by reading one input frame and writing one output frame (plus optional logs).
-// `assertSerializable` (from db.ts) guards the JSON boundary on the way out, so a frame that can't
-// survive JSON is rejected at encode time rather than silently mangled on the wire.
+// `jsonLossReason` (from db.ts) guards the JSON boundary on the way out, so a frame carrying a value
+// JSON can't preserve — a function, a Map, NaN/Infinity — is rejected at encode time rather than
+// silently mangled on the wire.
 
-import { assertSerializable } from '../db.ts';
+import { jsonLossReason } from '../db.ts';
 
 /** Thrown when a frame is structurally malformed (bad JSON or missing/ill-typed fields). */
 export class ProtocolError extends Error {
@@ -30,7 +31,7 @@ export interface InputFrame {
 }
 
 export function encodeInput(input: unknown): string {
-    assertSerializable(input, 'input');
+    assertFrameValue(input, 'input frame');
     return JSON.stringify({ input: input === undefined ? null : input });
 }
 
@@ -49,7 +50,7 @@ export type OutputFrame = { ok: true; result: unknown } | { ok: false; error: st
 
 export function encodeOutput(frame: OutputFrame): string {
     if (frame.ok) {
-        assertSerializable(frame.result, 'output result');
+        assertFrameValue(frame.result, 'output result');
         return JSON.stringify({ ok: true, result: frame.result === undefined ? null : frame.result });
     }
     return JSON.stringify({ ok: false, error: frame.error });
@@ -102,6 +103,15 @@ export function parseLogLine(line: string): LogFrame | null {
 }
 
 // ---- internals ----
+
+/** Reject a value JSON can't round-trip, phrased for the frame slot it fills (`what`). This is the
+ *  module's guarantee that a bad value fails at encode time instead of mangling on the wire. */
+function assertFrameValue(value: unknown, what: string): void {
+    const lossy = jsonLossReason(value);
+    if (lossy) {
+        throw new ProtocolError(`${what} holds a value JSON can't preserve (${lossy}) — send plain JSON data.`);
+    }
+}
 
 function parseJson(raw: string, what: string): unknown {
     try {

@@ -27,6 +27,19 @@ test('encodeInput rejects values JSON would silently drop', () => {
     expect(() => encodeInput(new Map([['a', 1]]))).toThrow(/Map/);
 });
 
+test('encode rejects NaN/Infinity instead of silently coercing them to null', () => {
+    expect(() => encodeInput(NaN)).toThrow(/non-finite/);
+    expect(() => encodeInput({ rate: Infinity })).toThrow(/non-finite/);
+    expect(() => encodeOutput({ ok: true, result: -Infinity })).toThrow(/non-finite/);
+    expect(() => encodeOutput({ ok: true, result: { avg: NaN } })).toThrow(/non-finite/);
+});
+
+test('encode failures are ProtocolErrors framed for the slot, not "returned"', () => {
+    expect(() => encodeInput({ cb: () => {} })).toThrow(ProtocolError);
+    expect(() => encodeInput({ cb: () => {} })).not.toThrow(/returned/);
+    expect(() => encodeOutput({ ok: true, result: new Map() })).toThrow(ProtocolError);
+});
+
 test('decodeInput rejects malformed input frames', () => {
     expect(() => decodeInput('not json')).toThrow(ProtocolError);
     expect(() => decodeInput('[]')).toThrow(/"input" field/);
