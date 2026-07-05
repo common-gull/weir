@@ -404,6 +404,11 @@ function buildCtx(
     }
 
     const execStepImpl = <T>(name: string, spec: StepSpec, opts: StepOpts<T>): Promise<T> => {
+        // A rung-1 exec step spawns an arbitrary module in a subprocess on the host with no
+        // isolation — the same unsandboxed host-code-execution privilege as runUnsafelyOnHost — so
+        // gate it on the same 'host-exec' capability. Like runUnsafelyOnHost, the gate runs before
+        // any ordinal/seq is consumed, so a denied call throws without touching replay state.
+        requireCapability('host-exec');
         const ord = bump(state.ordinals, name);
         const key = opts.key ?? `${name}#${ord}`;
         return memoized<T>('exec', name, key, async (seq) => ({ value: await runExecStep<T>(seq, spec, opts) }));

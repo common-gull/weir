@@ -291,8 +291,25 @@ test('loop it.runUnsafelyOnHost: granted -> per-iteration key identical to it.st
     expect(stepNames(id)).toEqual(['loop#0:0:try', 'loop#0:1:try', 'loop#0:2:try']);
 });
 
+test('ctx.step spec: denied without the host-exec capability, no subprocess spawned, no seq consumed', async () => {
+    defineWorkflow('nohostexec', {}, async (ctx) => {
+        await ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 42 } });
+        return 'ok';
+    });
+    const id = createRun(db, 'nohostexec');
+    expect(await executeRun(db, id)).toBe('failed'); // gate throws before spawning the module
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(run.error).toContain('host-exec');
+    expect(stepNames(id)).toEqual([]); // no seq consumed on a denied call
+    // No subprocess ran, so no step.log events were emitted by the module.
+    const logs = db.query(`SELECT count(*) AS c FROM events WHERE run_id = ? AND type = 'step.log'`).get(id) as {
+        c: number;
+    };
+    expect(logs.c).toBe(0);
+});
+
 test('ctx.step spec: runs a node module in a subprocess and memoizes its JSON result', async () => {
-    defineWorkflow('exec', {}, async (ctx) =>
+    defineWorkflow('exec', { capabilities: ['host-exec'] }, async (ctx) =>
         ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 42 } }),
     );
     const id = createRun(db, 'exec');
@@ -314,7 +331,7 @@ test('ctx.step spec: runs a node module in a subprocess and memoizes its JSON re
 
 test('ctx.step spec: a retry replays the memoized exec result without re-running the subprocess', async () => {
     let boom = true;
-    defineWorkflow('exec', {}, async (ctx) => {
+    defineWorkflow('exec', { capabilities: ['host-exec'] }, async (ctx) => {
         const r = await ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 1 } });
         await ctx.step('after', () => {
             if (boom) throw new Error('boom');

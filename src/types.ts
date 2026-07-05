@@ -89,7 +89,8 @@ export interface Ctx {
 
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     /** Spec form: route the step to the exec runtime (a subprocess) rather than running a closure
-     *  in-process. Discriminated from the closure form by `typeof arg2 !== 'function'`. */
+     *  in-process. Discriminated from the closure form by `typeof arg2 !== 'function'`. A rung-1 exec
+     *  step runs on the host with no isolation, so it's gated on the 'host-exec' capability. */
     step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
     /** Like `step`, but runs the closure in-process on the host with full daemon privileges (no
      *  isolation). Gated on the 'host-exec' capability; identical memo/replay/retry semantics. */
