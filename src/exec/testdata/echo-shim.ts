@@ -47,6 +47,21 @@ if (mode === 'hang') {
         await Bun.sleep(0); // yield so each chunk reaches the parent as its own read
     }
     process.stdout.write(encodeOutput({ ok: true, result: 'done' }));
+} else if (mode === 'frame-then-linger-stderr') {
+    // Flush a valid output frame and exit at once, but leave a detached grandchild holding the stderr
+    // pipe open for a while. The parent's stdout read and the child exit settle immediately, yet the
+    // parent's stderr drain stays pending across a shorter timeout deadline — the late SIGKILL that
+    // fires in that window must not overwrite the already-delivered frame with a timeout error. (A live
+    // Bun process can't release its own stdout pipe, so a lingering grandchild is how the post-read
+    // window is widened deterministically.)
+    const grandchild = Bun.spawn(['bun', '-e', 'await Bun.sleep(1000)'], {
+        stdin: 'ignore',
+        stdout: 'ignore',
+        stderr: 'inherit',
+    });
+    grandchild.unref();
+    await Bun.write(Bun.stdout, encodeOutput({ ok: true, result: 'flushed' }));
+    process.exit(0);
 } else if (mode === 'crash') {
     process.exit(3); // exit non-zero without ever writing an output frame
 } else {

@@ -99,6 +99,14 @@ test('a runaway child is SIGKILLed on the timeout and the daemon survives', asyn
     expect(1 + 1).toBe(2); // this process is plainly still alive to make the assertion
 });
 
+test('a frame flushed before a late timeout kill is returned, not discarded as a timeout', async () => {
+    // The child delivers a valid frame and exits at once, but leaves stderr held open past the timeout,
+    // so the deadline elapses while the parent is still draining stderr. The late SIGKILL fired in that
+    // window must not overwrite the already-delivered frame with a spurious timeout error.
+    const out = await runProtocol({ argv, input: { mode: 'frame-then-linger-stderr' }, timeoutMs: 400 });
+    expect(out).toEqual({ ok: true, result: 'flushed' });
+});
+
 test('a child that floods stdout is SIGKILLed by the output-size cap', async () => {
     const start = Date.now();
     await expect(

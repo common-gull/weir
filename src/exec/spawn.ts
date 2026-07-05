@@ -185,15 +185,21 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
             killed = 'output';
             proc.kill(9);
         });
+        // Freeze the kill cause the instant we hold the complete stdout frame. A kill that only trips
+        // during the exit/stderr drain below — a deadline reached under event-loop lag, an abort, an RSS
+        // poll firing after the child already flushed a valid frame — must not turn that success into a
+        // spurious failure. The guards stay armed (cleared in `finally`), so a child that closes stdout
+        // without exiting is still SIGKILLed by the timeout rather than awaited forever.
+        const killCause = killed;
         const exit = await proc.exited;
         await stderrDone;
 
-        if (killed === 'timeout') throw new Error(`protocol runner timed out after ${timeoutMs}ms (killed)`);
-        if (killed === 'memory') throw new Error(`protocol runner exceeded ${memoryMb}MB (killed)`);
-        if (killed === 'output') {
+        if (killCause === 'timeout') throw new Error(`protocol runner timed out after ${timeoutMs}ms (killed)`);
+        if (killCause === 'memory') throw new Error(`protocol runner exceeded ${memoryMb}MB (killed)`);
+        if (killCause === 'output') {
             throw new Error(`protocol runner produced more than ${maxOutputBytes} bytes of output (killed)`);
         }
-        if (killed === 'abort' && signal) throw abortError(signal);
+        if (killCause === 'abort' && signal) throw abortError(signal);
         if (exit !== 0 && stdout.trim() === '') {
             throw new Error(`protocol runner exited ${exit} without an output frame`);
         }
