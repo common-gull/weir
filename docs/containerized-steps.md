@@ -5,7 +5,7 @@ weir runs step bodies as relocatable subprocess modules by default, though today
 it's the rule to keep in mind when migrating a workflow:
 
 > **Only host-touching steps belong on `ctx.runUnsafelyOnHost`. Pure and transform steps stay on
-> `ctx.step`.**
+> `ctx.step`, run as exec steps in a subprocess.**
 
 ## Why it matters
 
@@ -18,11 +18,16 @@ isolation**. It is therefore gated on the `host-exec` capability, which a workfl
 explicitly:
 
 ```ts
-const greet = fileURLToPath(new URL('../lib/example-greet.ts', import.meta.url));
-
 defineWorkflow('example', { capabilities: ['host-exec'] }, async (ctx) => {
-    // pure: a relocatable (input) => output module, run in the exec runtime → ctx.step
-    const greeting = await ctx.step('greet', { runtime: 'node', module: greet }, { input: { name: 'world' } });
+    // pure: computation only — no host access → ctx.step, dispatched to the exec runtime (a
+    // subprocess). Each module lives in its own file; a value it needs is passed as `input`,
+    // never closed over, since nothing lexical crosses the subprocess boundary.
+    const name = await ctx.step<string>('pick-name', { runtime: 'node', module: './workflows/steps/pick-name.ts' });
+    const greeting = await ctx.step<string>(
+        'greet',
+        { runtime: 'node', module: './workflows/steps/greet.ts' },
+        { input: { name } },
+    );
 
     // host-touching: reads the host process → runUnsafelyOnHost (needs host-exec)
     const platform = await ctx.runUnsafelyOnHost('read-platform', () => process.platform);
@@ -31,21 +36,23 @@ defineWorkflow('example', { capabilities: ['host-exec'] }, async (ctx) => {
 });
 ```
 
-Both primitives memoize / replay / retry a step identically; they differ only in where the body
-runs — a relocatable subprocess module (`ctx.step`) versus an in-process host closure
-(`runUnsafelyOnHost`). Today's exec runtime is rung-1: the subprocess isn't yet sandboxed from the
-host, so both primitives are gated on the same `host-exec` capability. Still split steps by **least
-privilege**, since that's what makes the eventual isolation (docker, #C8) a drop-in capability
-change instead of a rewrite:
+Both primitives share identical memo / replay / retry semantics. What separates them is the
+isolation boundary weir is building toward: `ctx.step` is the seam that will gain a real sandbox,
+while `ctx.runUnsafelyOnHost` is the permanent host hatch that never does. So the choice is about
+**least privilege as isolation lands**:
 
 - A **pure** step (compute a value, transform data, format a string) needs nothing from the host, so
-  it belongs on `ctx.step` — a relocatable module ready to run sandboxed once real isolation lands.
-- Wrapping that same pure step in `ctx.runUnsafelyOnHost` is a **regression**: it locks the step into
-  an in-process closure that can never be sandboxed, even after #C8 lands.
+  route it through `ctx.step` — the path that gets sandboxed. Once isolation lands it runs sequestered
+  from the host and the workflow no longer needs `host-exec` on its behalf. (A rung-1 exec step
+  *today* still spawns an unsandboxed host subprocess — the same privilege as `runUnsafelyOnHost` — so
+  it is gated on `host-exec` for now; that requirement falls away only when isolation does.)
+- Wrapping that same pure step in `ctx.runUnsafelyOnHost` is a **regression**: it pins the step to
+  full daemon privilege permanently, forgoing the isolation `ctx.step` is on track to gain.
 
 When migrating, split each step by this test: *does it read or mutate the host* (spawn a process,
 touch the filesystem, read env/platform, open a socket)? If yes, it's a host step —
-`runUnsafelyOnHost`, and declare `host-exec`. If no, it stays `ctx.step` as a container step.
+`runUnsafelyOnHost`, and declare `host-exec`. If no, it's a pure step: give it its own module under
+`workflows/steps/` and route it through `ctx.step` as an exec spec.
 
 Inside a `ctx.loop`, `it.step` stays an in-process closure primitive (loop bodies aren't containerized
 in this cutover), and the same host hatch is loop-scoped: use `it.runUnsafelyOnHost` (the host
