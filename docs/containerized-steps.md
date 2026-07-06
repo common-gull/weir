@@ -31,15 +31,18 @@ defineWorkflow('example', { capabilities: ['host-exec'] }, async (ctx) => {
 });
 ```
 
-Both primitives share identical memo / replay / retry semantics — the only difference is the
-privilege boundary. So the choice is purely about **least privilege**:
+Both primitives share identical memo / replay / retry semantics. What separates them is the
+isolation boundary weir is building toward: `ctx.step` is the seam that will gain a real sandbox,
+while `ctx.runUnsafelyOnHost` is the permanent host hatch that never does. So the choice is about
+**least privilege as isolation lands**:
 
-- A **pure** step (compute a value, transform data, format a string) needs nothing from the host.
-  Leaving it on `ctx.step` means it runs isolated in a subprocess, and the workflow doesn't have to
-  hold `host-exec` on its behalf.
-- Wrapping that same pure step in `ctx.runUnsafelyOnHost` is a **regression**: it would grant the
-  step `host-exec` — full daemon privilege — that it does not need, and force the whole workflow to
-  declare the capability.
+- A **pure** step (compute a value, transform data, format a string) needs nothing from the host, so
+  route it through `ctx.step` — the path that gets sandboxed. Once isolation lands it runs sequestered
+  from the host and the workflow no longer needs `host-exec` on its behalf. (A rung-1 exec step
+  *today* still spawns an unsandboxed host subprocess — the same privilege as `runUnsafelyOnHost` — so
+  it is gated on `host-exec` for now; that requirement falls away only when isolation does.)
+- Wrapping that same pure step in `ctx.runUnsafelyOnHost` is a **regression**: it pins the step to
+  full daemon privilege permanently, forgoing the isolation `ctx.step` is on track to gain.
 
 When migrating, split each step by this test: *does it read or mutate the host* (spawn a process,
 touch the filesystem, read env/platform, open a socket)? If yes, it's a host step —
