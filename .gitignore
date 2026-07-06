@@ -123,6 +123,10 @@ __pycache__/
 *.db-shm
 .weir/
 
+# Agent-managed git worktrees: transient checkouts, each with its own config that would otherwise
+# collide with the repo's root tooling config (e.g. Biome's nested-root check).
+.claude/worktrees/
+
 # SvelteKit UI build output + generated types
 ui/build/
 .svelte-kit/

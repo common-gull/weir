@@ -45,6 +45,22 @@ export interface RunProtocolOpts {
     onLog?: (frame: LogFrame) => void;
 }
 
+/** Longest prefix of `s` whose UTF-8 encoding fits in `maxBytes`, measured in UTF-16 code units.
+ *  Iterating by code point (for…of) never cuts a surrogate pair, and at least one code point is always
+ *  taken so a flush loop makes progress even when the leading character alone exceeds `maxBytes`. */
+function byteBoundedPrefixLen(s: string, maxBytes: number): number {
+    let bytes = 0;
+    let units = 0;
+    for (const ch of s) {
+        const cp = ch.codePointAt(0) ?? 0;
+        const chBytes = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+        if (units > 0 && bytes + chBytes > maxBytes) break;
+        bytes += chBytes;
+        units += ch.length;
+    }
+    return units;
+}
+
 /** Split a byte stream into lines and hand each to `onLine` (a trailing partial line is emitted too).
  *  A newline-less line is flushed once it grows past `maxLineBytes`, so the buffer stays bounded and
  *  an adversarial child can't buffer the parent toward an OOM. */
@@ -75,10 +91,16 @@ async function pumpLines(
             }
             bufBytes = Buffer.byteLength(buf);
         }
-        if (bufBytes > maxLineBytes) {
-            onLine(buf);
-            buf = '';
-            bufBytes = 0;
+        // A single read can carry the buffer well past the cap (the runtime coalesces the child's
+        // writes into chunks larger than maxLineBytes), so flush in byte-bounded pieces rather than
+        // emitting the whole over-cap buffer as one frame — keeping every flushed frame near the cap
+        // and the retained tail under it.
+        while (bufBytes > maxLineBytes) {
+            const cut = byteBoundedPrefixLen(buf, maxLineBytes);
+            const piece = buf.slice(0, cut);
+            onLine(piece);
+            buf = buf.slice(cut);
+            bufBytes -= Buffer.byteLength(piece);
         }
     }
     const tail = buf + decoder.decode();
