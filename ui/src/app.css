@@ -273,6 +273,13 @@ pre.block { background: var(--parchment); border: 1px solid var(--rule); border-
   .brand { padding-left: 52px; }
 }
 
+/* Honor a reduced-motion request: show/hide the drawer instantly with no slide or scrim fade.
+   Must follow the block above — equal specificity, so source order decides when both queries match. */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+  .scrim { transition: none; }
+}
+
 /* Inky, understated scrollbars. */
 * { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
