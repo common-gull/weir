@@ -19,6 +19,11 @@
   let fWorkflow = $state('');
   let fStatus = $state('');
   let reloading = $state(false);
+  let drawerOpen = $state(false);
+
+  // Below 900px the sidebar is a modal off-canvas drawer; at/above it's the docked column. Mirror
+  // the CSS breakpoint here so the drawer is only treated as modal when it actually behaves that way.
+  let narrow = $state(false);
 
   let theme = $state((document.documentElement.dataset.theme ?? 'light') as 'light' | 'dark');
 
@@ -84,9 +89,38 @@
     fStatus;
     loadRuns();
   });
+
+  // Selecting a nav link navigates, which closes the off-canvas drawer on narrow screens.
+  $effect(() => {
+    page.url.pathname;
+    drawerOpen = false;
+  });
+
+  $effect(() => {
+    const mq = window.matchMedia('(max-width: 900px)');
+    const sync = () => {
+      narrow = mq.matches;
+      // Re-docking the sidebar at wide widths must drop any lingering open state, else .main below
+      // would stay inert on a layout where the drawer isn't modal (and the hamburger is hidden).
+      if (!narrow) drawerOpen = false;
+    };
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
 </script>
 
-<div class="app">
+<div class="app {drawerOpen ? 'drawer-open' : ''}">
+  <button
+    type="button"
+    class="btn sm hamburger"
+    aria-label="Toggle navigation"
+    aria-expanded={drawerOpen}
+    onclick={() => (drawerOpen = !drawerOpen)}
+  >
+    {drawerOpen ? '✕' : '☰'}
+  </button>
+  <button type="button" class="scrim" tabindex="-1" aria-label="Close navigation" onclick={() => (drawerOpen = false)}></button>
   <div class="sidebar">
     <div class="brand">
       <span class="brandname">weir</span>
@@ -142,7 +176,9 @@
     </div>
   </div>
 
-  <div class="main">
+  <!-- While the modal drawer is open, the page behind the scrim is inert so Tab can't escape the
+       drawer into the dimmed background (inert also hides it from assistive tech). -->
+  <div class="main" inert={narrow && drawerOpen}>
     {@render children()}
   </div>
 </div>

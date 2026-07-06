@@ -225,6 +225,54 @@ pre.block { background: var(--parchment); border: 1px solid var(--rule); border-
 .run-item .idcol { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-item .time { color: var(--ink-soft); font-size: 10.5px; font-family: var(--mono); }
 
+/* ---- Responsive drawer ----
+   At/above 900px the sidebar is the docked 320px grid column (rules above). Below it, the sidebar
+   becomes a fixed off-canvas drawer the hamburger slides in over a dimming scrim. Both the hamburger
+   and scrim are display:none above the breakpoint, so the wide layout is untouched. */
+.hamburger { display: none; }
+.scrim { display: none; }
+
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; }
+
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 320px;
+    max-width: 85vw;
+    z-index: 30;
+    /* Opaque paper under the sidebar tint so scrimmed content never bleeds through the drawer. */
+    background: linear-gradient(var(--sidebar-tint), var(--sidebar-tint)), var(--paper);
+    transform: translateX(-100%);
+    /* Off-canvas while closed: visibility:hidden pulls the drawer's nav links out of the tab order
+       and the a11y tree — translateX alone leaves them focusable behind visible content. It flips
+       visible instantly on open and holds through the slide-out on close, so the anim is preserved. */
+    visibility: hidden;
+    transition: transform 0.1s, visibility 0.1s;
+  }
+  .app.drawer-open .sidebar { transform: translateX(0); visibility: visible; }
+
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    border: none;
+    padding: 0;
+    background: var(--shadow);
+    opacity: 0;
+    pointer-events: none;
+    cursor: pointer;
+    transition: opacity 0.1s;
+  }
+  .app.drawer-open .scrim { opacity: 1; pointer-events: auto; }
+
+  .hamburger { display: inline-flex; position: fixed; top: 12px; left: 12px; z-index: 40; }
+  /* Clear room for the fixed hamburger over the page content and, when open, the drawer's wordmark. */
+  .main { padding-top: 56px; }
+  .brand { padding-left: 52px; }
+}
+
 /* Inky, understated scrollbars. */
 * { scrollbar-width: thin; scrollbar-color: var(--scroll) transparent; }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
