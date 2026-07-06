@@ -131,9 +131,14 @@ __pycache__/
 ui/build/
 .svelte-kit/
 
-# workflows are personal — only the example is tracked
+# workflows are personal — only the example (and the step modules it references) are tracked
 workflows/*
 !workflows/example.ts
+!workflows/example.test.ts
+!workflows/steps/
+workflows/steps/*
+!workflows/steps/pick-name.ts
+!workflows/steps/greet.ts
 
 # lib is personal — only the README (documenting what goes here) is tracked
 lib/*

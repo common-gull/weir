@@ -4,7 +4,7 @@ weir is moving step execution toward isolation. As that lands, one rule decides 
 goes — and it's the rule to keep in mind when migrating a workflow:
 
 > **Only host-touching steps belong on `ctx.runUnsafelyOnHost`. Pure and transform steps stay on
-> `ctx.step`.**
+> `ctx.step`, run as exec steps in a subprocess.**
 
 ## Why it matters
 
@@ -14,9 +14,15 @@ explicitly:
 
 ```ts
 defineWorkflow('example', { capabilities: ['host-exec'] }, async (ctx) => {
-    // pure: computation only — no host access → ctx.step
-    const name = await ctx.step('pick-name', () => 'world');
-    const greeting = await ctx.step('greet', () => `hello, ${name}`);
+    // pure: computation only — no host access → ctx.step, dispatched to the exec runtime (a
+    // subprocess). Each module lives in its own file; a value it needs is passed as `input`,
+    // never closed over, since nothing lexical crosses the subprocess boundary.
+    const name = await ctx.step<string>('pick-name', { runtime: 'node', module: './workflows/steps/pick-name.ts' });
+    const greeting = await ctx.step<string>(
+        'greet',
+        { runtime: 'node', module: './workflows/steps/greet.ts' },
+        { input: { name } },
+    );
 
     // host-touching: reads the host process → runUnsafelyOnHost (needs host-exec)
     const platform = await ctx.runUnsafelyOnHost('read-platform', () => process.platform);
@@ -29,15 +35,16 @@ Both primitives share identical memo / replay / retry semantics — the only dif
 privilege boundary. So the choice is purely about **least privilege**:
 
 - A **pure** step (compute a value, transform data, format a string) needs nothing from the host.
-  Leaving it on `ctx.step` means it can run isolated once isolation lands, and the workflow doesn't
-  have to hold `host-exec` on its behalf.
+  Leaving it on `ctx.step` means it runs isolated in a subprocess, and the workflow doesn't have to
+  hold `host-exec` on its behalf.
 - Wrapping that same pure step in `ctx.runUnsafelyOnHost` is a **regression**: it would grant the
   step `host-exec` — full daemon privilege — that it does not need, and force the whole workflow to
   declare the capability.
 
 When migrating, split each step by this test: *does it read or mutate the host* (spawn a process,
 touch the filesystem, read env/platform, open a socket)? If yes, it's a host step —
-`runUnsafelyOnHost`, and declare `host-exec`. If no, it stays `ctx.step`.
+`runUnsafelyOnHost`, and declare `host-exec`. If no, it's a pure step: give it its own module under
+`workflows/steps/` and route it through `ctx.step` as an exec spec.
 
 Inside a `ctx.loop`, the same hatch is loop-scoped: use `it.runUnsafelyOnHost` (the host counterpart
 of `it.step`) for a host-touching iteration step. It keeps `it.step`'s per-iteration namespacing, so
