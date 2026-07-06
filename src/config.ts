@@ -11,6 +11,10 @@ export interface WeirConfig {
     port: number;
     uiDir: string;
     retentionDays: number;
+    /** Content-addressed artifact store for spec-step outputs (#C4/#C6). */
+    storeDir: string;
+    /** Root under which each artifact-staging spec step gets an isolated scratch dir. */
+    scratchDir: string;
 }
 
 export function loadConfig(cwd = process.cwd()): WeirConfig {
@@ -31,5 +35,7 @@ export function loadConfig(cwd = process.cwd()): WeirConfig {
         port: Number(process.env.WEIR_PORT ?? file.port ?? 8099),
         uiDir: resolve(process.env.WEIR_UI ?? file.uiDir ?? join(cwd, 'ui', 'build')),
         retentionDays: Number(process.env.WEIR_RETENTION_DAYS ?? file.retentionDays ?? 14),
+        storeDir: resolve(process.env.WEIR_STORE ?? file.storeDir ?? join(cwd, '.weir', 'artifacts')),
+        scratchDir: resolve(process.env.WEIR_SCRATCH ?? file.scratchDir ?? join(cwd, '.weir', 'scratch')),
     };
 }

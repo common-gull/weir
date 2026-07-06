@@ -55,6 +55,20 @@ export interface StepOpts<T = unknown> {
  *  and memoizes its JSON result exactly like a closure step. */
 export type StepSpec = LocalStepSpec;
 
+/** A spec that declares `outputs`: after the run, the engine snapshots each declared path from the
+ *  step's scratch dir into the artifact store and hands the workflow an {@link ExecResult}. */
+export type StepSpecWithOutputs = LocalStepSpec & { outputs: string[] };
+
+/** A step's declared output path → the sha256 hash it was content-addressed to in the store. */
+export type StepArtifacts = Record<string, string>;
+
+/** What a spec step that declares `outputs` resolves to: the module's JSON result plus the content
+ *  hashes its declared outputs were snapshotted to (also recorded in the step's memo row). */
+export interface ExecResult<T = unknown> {
+    result: T;
+    artifacts: StepArtifacts;
+}
+
 export interface LoopOpts<T = unknown> {
     max: number; // required hard cap — no infinite loops
     until?: (result: T) => boolean;
@@ -88,6 +102,9 @@ export interface Ctx {
     readonly capabilities: ReadonlySet<Capability>;
 
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
+    /** Spec form declaring `outputs`: like the base spec form, but resolves to the module's result
+     *  paired with the content hashes its declared outputs were snapshotted to. */
+    step<T = unknown>(name: string, spec: StepSpecWithOutputs, opts?: StepOpts<T>): Promise<ExecResult<T>>;
     /** Spec form: route the step to the exec runtime (a subprocess) rather than running a closure
      *  in-process. Discriminated from the closure form by `typeof arg2 !== 'function'`. A rung-1 exec
      *  step runs on the host with no isolation, so it's gated on the 'host-exec' capability. */
@@ -175,6 +192,8 @@ export interface StepRow {
     result: string | null;
     error: string | null;
     child_run_id: string | null;
+    /** JSON `{path: sha256}` map of artifacts a spec step snapshotted into the store, else null. */
+    artifacts: string | null;
     created_at: number;
 }
 

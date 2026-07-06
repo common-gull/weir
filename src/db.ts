@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS steps (
   result       TEXT,
   error        TEXT,
   child_run_id TEXT,
+  artifacts    TEXT,
   created_at   INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_steps_seq ON steps(run_id, seq);
@@ -128,7 +129,22 @@ export function openDb(path: string): DB {
     db.run('PRAGMA busy_timeout = 5000');
     db.run('PRAGMA foreign_keys = ON');
     db.run(SCHEMA);
+    migrate(db);
     return db;
+}
+
+/** Additive column migrations for databases created before a column was added to SCHEMA.
+ *  `CREATE TABLE IF NOT EXISTS` is a no-op against a table already on disk, so a new column never
+ *  reaches an older `.weir/*.db` — its writes would then fail with "no column named …". SQLite has
+ *  no `ADD COLUMN IF NOT EXISTS`, so guard each add on the live table's columns. */
+function migrate(db: DB): void {
+    addColumn(db, 'steps', 'artifacts', 'TEXT');
+}
+
+/** Add `column` to `table` if the live schema lacks it. Names are trusted literals, not input. */
+function addColumn(db: DB, table: string, column: string, decl: string): void {
+    const cols = db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === column)) db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
 }
 
 /** Run `fn` inside an IMMEDIATE transaction. `fn` MUST be pure/synchronous DB work. */
