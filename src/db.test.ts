@@ -95,6 +95,38 @@ test('openDb backfills the steps.artifacts column on a database created before i
     }
 });
 
+test('concurrent openDb on a legacy database never crashes on a duplicate column', async () => {
+    const path = join(tmpdir(), `weir-migrate-race-${crypto.randomUUID()}.db`);
+    try {
+        // Legacy `steps` table missing the artifacts column, so every opener will try to ALTER it in.
+        const legacy = new Database(path, { create: true });
+        legacy.run(`CREATE TABLE steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, seq INTEGER NOT NULL,
+            key TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+            result TEXT, error TEXT, child_run_id TEXT, created_at INTEGER NOT NULL)`);
+        legacy.close();
+
+        // bun:sqlite is synchronous, so the check-then-ALTER race only manifests across processes:
+        // spawn several openers on the same file at once. Before the fix the migration loser threw
+        // "duplicate column name" and crashed — assert none of them does, and that the column lands.
+        // (We deliberately don't assert every exit code is 0: an occasional subprocess spawn failure
+        // under a loaded test run exits non-zero with empty stderr, unrelated to the migration.)
+        const script = `import { openDb } from ${JSON.stringify(join(import.meta.dir, 'db.ts'))}; openDb(${JSON.stringify(path)}).close();`;
+        const procs = Array.from({ length: 6 }, () => Bun.spawn(['bun', '-e', script], { stderr: 'pipe' }));
+        const errs = await Promise.all(procs.map((p) => p.exited.then(() => new Response(p.stderr).text())));
+        expect(errs.join('')).not.toContain('duplicate column');
+
+        // A raw read (no migrate) confirms an opener actually added the column rather than the assert
+        // below silently re-migrating it.
+        const raw = new Database(path, { readonly: true });
+        const cols = (raw.query(`PRAGMA table_info(steps)`).all() as { name: string }[]).map((c) => c.name);
+        raw.close();
+        expect(cols).toContain('artifacts');
+    } finally {
+        await Promise.all([path, `${path}-wal`, `${path}-shm`].map((p) => rm(p, { force: true })));
+    }
+});
+
 test('pruneHistory clears expired kv', () => {
     db.query(`INSERT INTO kv (namespace, key, value, expires_at, updated_at) VALUES ('n','k','1',?,?)`).run(
         Date.now() - 1000,

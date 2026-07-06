@@ -144,7 +144,16 @@ function migrate(db: DB): void {
 /** Add `column` to `table` if the live schema lacks it. Names are trusted literals, not input. */
 function addColumn(db: DB, table: string, column: string, decl: string): void {
     const cols = db.query(`PRAGMA table_info(${table})`).all() as { name: string }[];
-    if (!cols.some((c) => c.name === column)) db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    if (cols.some((c) => c.name === column)) return;
+    try {
+        db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    } catch (e) {
+        // The check above and this ALTER aren't atomic across processes: a concurrent openDb (e.g. a
+        // CLI command while the daemon is starting) can add the column in between. SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so a duplicate-column error means the migration already ran —
+        // treat it as done rather than crashing this process.
+        if (!/duplicate column name/i.test((e as Error).message)) throw e;
+    }
 }
 
 /** Run `fn` inside an IMMEDIATE transaction. `fn` MUST be pure/synchronous DB work. */
