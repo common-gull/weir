@@ -25,6 +25,9 @@ const DEFAULT_MAX_STDERR_LINE_BYTES = 1024 * 1024;
 export interface RunProtocolOpts {
     /** Command line to spawn; `argv[0]` is the executable. Constructed by the caller (C3/C8). */
     argv: string[];
+    /** Working directory for the child — the step's scratch dir when it stages artifacts (#C6).
+     *  Undefined leaves the child in the daemon cwd. */
+    cwd?: string;
     /** Value marshalled into the C1 input frame on the child's stdin. */
     input: unknown;
     /** Aborts the run and SIGKILLs the child; the returned promise rejects with the signal's reason. */
@@ -138,7 +141,7 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
 
     const inputFrame = encodeInput(input); // may throw ProtocolError for non-JSON input — before we spawn
 
-    const proc = Bun.spawn(argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    const proc = Bun.spawn(argv, { cwd: opts.cwd, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
     try {
         proc.stdin.write(inputFrame);
         proc.stdin.end();

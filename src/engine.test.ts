@@ -1,16 +1,36 @@
-import { expect, test, beforeEach } from 'bun:test';
+import { afterEach, expect, test, beforeEach } from 'bun:test';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getArtifact } from './artifacts.ts';
 import { openDb, type DB } from './db.ts';
-import { clearRegistry, defineWorkflow, executeRun } from './engine.ts';
+import { clearRegistry, defineWorkflow, executeRun, type RunDeps } from './engine.ts';
 import { approveRun, createRun, retryRun } from './runs.ts';
 
 let db: DB;
+const tmpDirs: string[] = [];
 beforeEach(() => {
     db = openDb(':memory:');
     clearRegistry();
 });
+afterEach(async () => {
+    for (const d of tmpDirs.splice(0)) await rm(d, { recursive: true, force: true });
+});
+
+/** Fresh store + scratch dirs threaded to a run so its spec-step artifacts land somewhere the test
+ *  can inspect; cleaned up in afterEach. */
+async function artifactDeps(): Promise<RunDeps> {
+    const storeDir = await mkdtemp(join(tmpdir(), 'weir-store-'));
+    const scratchDir = await mkdtemp(join(tmpdir(), 'weir-scratch-'));
+    tmpDirs.push(storeDir, scratchDir);
+    return { storeDir, scratchDir };
+}
 
 const nodeStep = fileURLToPath(new URL('./exec/testdata/node-step.ts', import.meta.url));
+const writer = fileURLToPath(new URL('./exec/testdata/artifact-writer.ts', import.meta.url));
+const reader = fileURLToPath(new URL('./exec/testdata/artifact-reader.ts', import.meta.url));
 
 const stepNames = (runId: string) =>
     (db.query(`SELECT key FROM steps WHERE run_id = ? ORDER BY seq`).all(runId) as { key: string }[]).map((r) => r.key);
@@ -378,3 +398,90 @@ test('retryRun --from matches step names exactly (no substring over-delete)', as
     await executeRun(db, id);
     expect(ran).toEqual(['deploy']);
 });
+
+test('exec artifacts: declared outputs are content-addressed into the store and recorded in the memo', async () => {
+    const deps = await artifactDeps();
+    defineWorkflow('produce', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.step(
+            'make',
+            { runtime: 'node', module: writer, outputs: ['out.txt'] },
+            { input: { path: 'out.txt', text: 'hello-artifact' } },
+        ),
+    );
+    const id = createRun(db, 'produce');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    // The path -> hash map is recorded in the step's memo row (the additive `artifacts` column).
+    const step = db.query(`SELECT artifacts FROM steps WHERE run_id = ?`).get(id) as { artifacts: string };
+    const map = JSON.parse(step.artifacts) as Record<string, string>;
+    const hash = map['out.txt'] ?? '';
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+
+    // The bytes live in the store under that hash, and the workflow saw { result, artifacts }.
+    expect(await readFile(getArtifact(deps.storeDir ?? '', hash), 'utf8')).toBe('hello-artifact');
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({ result: { wrote: 'out.txt' }, artifacts: { 'out.txt': hash } });
+}, 20_000);
+
+test('exec artifacts: a downstream step receives declared input artifacts staged into its scratch', async () => {
+    const deps = await artifactDeps();
+    defineWorkflow('chain', { capabilities: ['host-exec'] }, async (ctx) => {
+        const a = await ctx.step(
+            'make',
+            { runtime: 'node', module: writer, outputs: ['out.txt'] },
+            { input: { path: 'out.txt', text: 'chained-bytes' } },
+        );
+        // Declare the produced hash as an input of the next step, staged in under a new name.
+        return ctx.step(
+            'use',
+            { runtime: 'node', module: reader, inputs: [{ hash: a.artifacts['out.txt'] ?? '', path: 'in.txt' }] },
+            { input: { path: 'in.txt' } },
+        );
+    });
+    const id = createRun(db, 'chain');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({ content: 'chained-bytes' });
+}, 20_000);
+
+test('exec artifacts: re-running an identical step replays the stored artifact instead of rebuilding', async () => {
+    const deps = await artifactDeps();
+    let boom = true;
+    defineWorkflow('rebuild', { capabilities: ['host-exec'] }, async (ctx) => {
+        const a = await ctx.step(
+            'make',
+            { runtime: 'node', module: writer, outputs: ['out.txt'] },
+            { input: { path: 'out.txt', text: 'once' } },
+        );
+        await ctx.step('gate', () => {
+            if (boom) throw new Error('boom');
+            return 1;
+        });
+        return a;
+    });
+    const id = createRun(db, 'rebuild');
+    expect(await executeRun(db, id, deps)).toBe('failed'); // writer runs once, then `gate` throws
+
+    const writes = () =>
+        (
+            db
+                .query(`SELECT count(*) AS c FROM events WHERE run_id = ? AND type = 'step.log' AND message = 'WRITE'`)
+                .get(id) as { c: number }
+        ).c;
+    expect(writes()).toBe(1);
+    const step0 = db.query(`SELECT artifacts FROM steps WHERE run_id = ? AND key = 'make#0'`).get(id) as {
+        artifacts: string;
+    };
+    const hash = (JSON.parse(step0.artifacts) as Record<string, string>)['out.txt'] ?? '';
+
+    boom = false;
+    retryRun(db, id);
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    // The writer subprocess did NOT run again — the memo replayed the stored artifact by hash.
+    expect(writes()).toBe(1);
+    expect(existsSync(getArtifact(deps.storeDir ?? '', hash))).toBe(true);
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({ result: { wrote: 'out.txt' }, artifacts: { 'out.txt': hash } });
+}, 20_000);

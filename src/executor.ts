@@ -40,6 +40,9 @@ export interface ExecutorOpts {
     maxConcurrent?: number;
     pools?: Record<string, number>;
     pollMs?: number;
+    /** Artifact store + scratch root threaded to every run's spec steps (#C6). */
+    storeDir?: string;
+    scratchDir?: string;
 }
 
 export class Executor {
@@ -64,6 +67,8 @@ export class Executor {
         if (!controller) throw new Error(`no controller for run ${runId}`);
         return {
             signal: controller.signal,
+            storeDir: this.opts.storeDir,
+            scratchDir: this.opts.scratchDir,
             acquire: async (pool, signal) => {
                 const sem = this.pools.get(pool);
                 if (!sem) return () => {}; // unconfigured pool = unbounded

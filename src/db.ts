@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS steps (
   result       TEXT,
   error        TEXT,
   child_run_id TEXT,
+  artifacts    TEXT,
   created_at   INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_steps_seq ON steps(run_id, seq);
