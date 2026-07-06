@@ -54,10 +54,12 @@ touch the filesystem, read env/platform, open a socket)? If yes, it's a host ste
 `runUnsafelyOnHost`, and declare `host-exec`. If no, it's a pure step: give it its own module under
 `workflows/steps/` and route it through `ctx.step` as an exec spec.
 
-Inside a `ctx.loop`, `it.step` stays an in-process closure primitive (loop bodies aren't containerized
-in this cutover), and the same host hatch is loop-scoped: use `it.runUnsafelyOnHost` (the host
-counterpart of `it.step`) for a host-touching iteration step. It keeps `it.step`'s per-iteration
-namespacing, so migrating `it.step` → `it.runUnsafelyOnHost` only adds the `host-exec` gate — the
-memo key is unchanged and an in-flight run still replays.
+Inside a `ctx.loop`, `it.step` gets the same cutover: it's a container step that takes a
+`{ runtime, module }` spec and rejects a closure. Host-touching iteration work moves to
+`it.runUnsafelyOnHost` (the loop-scoped host hatch, gated on `host-exec`), which keeps `it.step`'s
+per-iteration namespacing — migrating `it.step` → `it.runUnsafelyOnHost` leaves the memo key
+unchanged, so an in-flight run still replays. `ctx.map` runs its mapper as an in-process host
+closure, so it's gated on `host-exec` too — without that gate it would be a way to run host code
+around the capability.
 
 See `workflows/example.ts` for a tracked, tested demonstration.
