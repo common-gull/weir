@@ -407,8 +407,8 @@ function buildCtx(
     };
 
     // Exec-runtime step (rung-1): run the module in a subprocess (C2) via a runtime-specific argv
-    // (C3) instead of an in-process closure. Streamed log lines surface as step.log events like the
-    // closure step's log channel. When the spec declares inputs/outputs the step runs in an isolated
+    // (C3) rather than in-process on the host. Streamed log lines surface as step.log events like the
+    // in-process host step's log channel. When the spec declares inputs/outputs the step runs in an isolated
     // scratch dir (#C6): declared input artifacts are staged in from the store beforehand and declared
     // outputs snapshotted back into it afterward, their `path -> hash` map returned alongside the
     // module's JSON result. The scratch dir is torn down once outputs are safely content-addressed.
@@ -464,13 +464,23 @@ function buildCtx(
         });
     };
 
-    // `ctx.step` overload dispatch: a closure runs in-process (unchanged); a spec routes to the exec
-    // runtime. Discriminated by `typeof arg2 === 'function'`.
+    // `ctx.step` is container-by-default: a spec routes to the exec runtime; a closure is rejected
+    // loudly (no silent in-process fallback), so host-touching work moves to the gated escape hatch
+    // ctx.runUnsafelyOnHost. The throw fires before any seq is consumed, so it never corrupts replay.
     const stepDispatch = (
         name: string,
         arg2: ((s: StepCtx) => unknown) | StepSpec,
         opts: StepOpts = {},
-    ): Promise<unknown> => (typeof arg2 === 'function' ? stepImpl(name, arg2, opts) : execStepImpl(name, arg2, opts));
+    ): Promise<unknown> => {
+        if (typeof arg2 === 'function') {
+            throw new Error(
+                `ctx.step("${name}", fn): closure steps no longer run in-process. Pass a StepSpec ` +
+                    `{ runtime, module } to run it in the exec runtime, or use ctx.runUnsafelyOnHost ` +
+                    `(gated on 'host-exec') for host-touching work.`,
+            );
+        }
+        return execStepImpl(name, arg2, opts);
+    };
 
     const ctx: Ctx = {
         runId,

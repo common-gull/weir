@@ -50,9 +50,9 @@ export interface StepOpts<T = unknown> {
     input?: unknown; // payload for a spec step — marshalled into the exec runtime's input frame
 }
 
-/** Routes a step to the exec runtime (a subprocess speaking the stdio protocol) instead of an
- *  in-process closure. `ctx.step(name, spec, { input })` builds the runtime's argv, runs the module,
- *  and memoizes its JSON result exactly like a closure step. */
+/** The container-step body `ctx.step` runs: a module the exec runtime executes in a subprocess
+ *  speaking the stdio protocol. `ctx.step(name, spec, { input })` builds the runtime's argv, runs the
+ *  module, and memoizes its JSON result like any step (the in-process `runUnsafelyOnHost` included). */
 export type StepSpec = LocalStepSpec;
 
 /** A spec that declares `outputs`: after the run, the engine snapshots each declared path from the
@@ -101,16 +101,17 @@ export interface Ctx {
     readonly input: unknown;
     readonly capabilities: ReadonlySet<Capability>;
 
-    step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
-    /** Spec form declaring `outputs`: like the base spec form, but resolves to the module's result
-     *  paired with the content hashes its declared outputs were snapshotted to. */
+    /** A container step: its body is a relocatable `(input) => output` module the exec runtime runs
+     *  in its own subprocess (src/exec), memoized/replayed/retried exactly like any step. Declaring
+     *  `outputs` resolves to the module's result paired with the content hashes those outputs were
+     *  snapshotted to. A rung-1 exec step runs on the host with no isolation, so it's gated on the
+     *  'host-exec' capability. Closures are no longer accepted — host-touching work that must run
+     *  in-process goes on {@link runUnsafelyOnHost}, and passing a function throws. */
     step<T = unknown>(name: string, spec: StepSpecWithOutputs, opts?: StepOpts<T>): Promise<ExecResult<T>>;
-    /** Spec form: route the step to the exec runtime (a subprocess) rather than running a closure
-     *  in-process. Discriminated from the closure form by `typeof arg2 !== 'function'`. A rung-1 exec
-     *  step runs on the host with no isolation, so it's gated on the 'host-exec' capability. */
     step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
-    /** Like `step`, but runs the closure in-process on the host with full daemon privileges (no
-     *  isolation). Gated on the 'host-exec' capability; identical memo/replay/retry semantics. */
+    /** The host escape hatch: run a closure in-process on the host with full daemon privileges (no
+     *  isolation). Gated on the 'host-exec' capability; identical memo/replay/retry semantics to
+     *  {@link step}. Only host-touching work belongs here — pure/transform work is a container `step`. */
     runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     loop<T>(opts: LoopOpts<T>, body: (it: LoopCtx) => T | Promise<T>): Promise<T>;
     map<I, O>(

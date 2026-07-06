@@ -1,6 +1,6 @@
 // Rung-1 node runtime shim. src/exec/runtime.ts spawns this as `bun node-shim.ts <module>`; it
 // speaks the C1 protocol (src/exec/protocol.ts) so an author writes just `export default (input) =>
-// output`. Generalizes src/tools/isolate-runner.ts from inlined code to a shipped-in module path.
+// output` in a shipped-in module rather than inlined code.
 // Written in portable JS (no Bun-only globals) so the same file runs under host bun today and a real
 // node base image under C8 (docker) tomorrow — mirroring the substrate-independent python shim.
 //
