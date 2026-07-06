@@ -20,6 +20,7 @@
   let fStatus = $state('');
   let reloading = $state(false);
   let drawerOpen = $state(false);
+  let hamburger = $state<HTMLButtonElement | null>(null);
 
   // Below 900px the sidebar is a modal off-canvas drawer; at/above it's the docked column. Mirror
   // the CSS breakpoint here so the drawer is only treated as modal when it actually behaves that way.
@@ -41,6 +42,13 @@
     } catch {
       /* storage unavailable */
     }
+  }
+
+  // Closing the drawer returns focus to the hamburger so a keyboard user who opened it (or pressed
+  // Escape) lands back on the control they came from instead of losing their place to <body>.
+  function closeDrawer() {
+    drawerOpen = false;
+    hamburger?.focus();
   }
 
   async function loadRuns() {
@@ -108,6 +116,27 @@
     mq.addEventListener('change', sync);
     return () => mq.removeEventListener('change', sync);
   });
+
+  // Escape closes the open drawer (closeDrawer returns focus to the hamburger). Bound only while
+  // open so Escape stays free elsewhere; a full focus-trap is intentionally out of scope here.
+  $effect(() => {
+    if (!drawerOpen) return;
+    const onKeydown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeDrawer();
+    };
+    window.addEventListener('keydown', onKeydown);
+    return () => window.removeEventListener('keydown', onKeydown);
+  });
+
+  // Lock background scroll while the drawer is open so the scrimmed page behind it can't scroll away.
+  $effect(() => {
+    if (!drawerOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  });
 </script>
 
 <div class="app {drawerOpen ? 'drawer-open' : ''}">
@@ -116,11 +145,12 @@
     class="btn sm hamburger"
     aria-label="Toggle navigation"
     aria-expanded={drawerOpen}
+    bind:this={hamburger}
     onclick={() => (drawerOpen = !drawerOpen)}
   >
     {drawerOpen ? '✕' : '☰'}
   </button>
-  <button type="button" class="scrim" tabindex="-1" aria-label="Close navigation" onclick={() => (drawerOpen = false)}></button>
+  <button type="button" class="scrim" tabindex="-1" aria-label="Close navigation" onclick={closeDrawer}></button>
   <div class="sidebar">
     <div class="brand">
       <span class="brandname">weir</span>
