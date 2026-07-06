@@ -24,7 +24,7 @@ test('buildDockerArgv defaults to no network and mounts the scratch dir at /weir
     ]);
 });
 
-test('buildDockerArgv injects env as -e NAME=VALUE and appends the cmd after the image', () => {
+test('buildDockerArgv forwards env by name as -e NAME and appends the cmd after the image', () => {
     const image = `img@${DIGEST}`;
     const argv = buildDockerArgv(
         { image, cmd: ['python3', '/weir/step.py'] },
@@ -32,7 +32,9 @@ test('buildDockerArgv injects env as -e NAME=VALUE and appends the cmd after the
     );
     expect(argv.slice(0, 7)).toEqual(['docker', 'run', '--rm', '--network', 'none', '-v', '/s:/weir']);
     const eIdx = argv.indexOf('-e');
-    expect(argv.slice(eIdx, eIdx + 4)).toEqual(['-e', 'GH_TOKEN=secret', '-e', 'PATH=/usr/bin']);
+    // name-only references — docker reads the value from its own env, so no secret lands in argv.
+    expect(argv.slice(eIdx, eIdx + 4)).toEqual(['-e', 'GH_TOKEN', '-e', 'PATH']);
+    expect(argv).not.toContain('GH_TOKEN=secret');
     // the image (pinned by digest) then its command tail close the argv.
     expect(argv.slice(-3)).toEqual([image, 'python3', '/weir/step.py']);
 });
@@ -62,8 +64,10 @@ test('cap-scoped env from resolveExecEnv flows into the docker argv (C7)', () =>
     const env = withCaps(['gh-pr'], () => resolveExecEnv(source));
     const flat = buildDockerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
     // gh-pr authorizes GH_TOKEN; PATH is the operational baseline; UNRELATED is neither → withheld.
-    expect(flat).toContain('-e GH_TOKEN=ghs_secret');
-    expect(flat).toContain('-e PATH=/usr/bin');
+    // Forwarded by name, so the secret value never appears in the argv.
+    expect(flat).toContain('-e GH_TOKEN');
+    expect(flat).not.toContain('ghs_secret');
+    expect(flat).toContain('-e PATH');
     expect(flat).not.toContain('UNRELATED');
 });
 
@@ -74,11 +78,13 @@ test('dockerCapabilityMounts is empty without the claude capability', () => {
     expect(mounts).toEqual([]);
 });
 
-test('the claude capability mounts ~/.claude into the container', () => {
+test('the claude capability mounts ~/.claude read-only into the container', () => {
     const mounts = withCaps(['claude'], dockerCapabilityMounts);
     expect(mounts).toHaveLength(1);
     expect(mounts[0]?.container).toBe('/root/.claude');
     expect(mounts[0]?.host.endsWith('.claude')).toBe(true);
+    // read-only so a compromised step image can't plant a hook or rewrite credentials on the host.
+    expect(mounts[0]?.readonly).toBe(true);
 });
 
 // ---- digest parsing / pinning (pure strings) ----

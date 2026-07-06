@@ -70,8 +70,9 @@ export function buildArgv(spec: LocalStepSpec): string[] {
 // rather than a local interpreter. The container is locked down by default: `--network none` (no
 // egress) and only the per-step scratch dir bind-mounted at /weir, so the module sees its staged
 // inputs and writes its outputs there and nothing else of the host. Credentials reach it the same
-// capability-scoped way rung-1 gets them (resolveExecEnv, #C7), injected as `-e NAME=VALUE`; the
-// image is pinned by digest (src/exec/docker.ts) so a replay runs the exact bytes the first run did.
+// capability-scoped way rung-1 gets them (resolveExecEnv, #C7), forwarded by name (`-e NAME`, so the
+// value comes from the docker CLI's env and never lands on the host process table); the image is
+// pinned by digest (src/exec/docker.ts) so a replay runs the exact bytes the first run did.
 
 /** A host→container bind mount. `readonly` maps to docker's `:ro` volume suffix. */
 export interface DockerMount {
@@ -97,7 +98,8 @@ function mountArg(m: DockerMount): string {
 }
 
 /** Build the `docker run` argv for a container step. Pure: the per-step scratch dir (bind-mounted at
- *  /weir), the capability-scoped env (from resolveExecEnv, #C7, passed as `-e NAME=VALUE`), and any
+ *  /weir), the capability-scoped env (from resolveExecEnv, #C7, forwarded by name as `-e NAME` so
+ *  values stay off the host process table), and any
  *  extra mounts (e.g. the claude capability's ~/.claude, see dockerCapabilityMounts) are all passed
  *  in, so the whole argv is a deterministic function of its inputs and unit-testable without Docker.
  *  Defaults to `--network none` and `--rm`: a step gets no egress and leaves no stopped container. */
@@ -110,7 +112,10 @@ export function buildDockerArgv(
     }
     const mounts: DockerMount[] = [{ host: opts.scratch, container: '/weir' }, ...(opts.mounts ?? [])];
     const mountArgs = mounts.flatMap((m) => ['-v', mountArg(m)]);
-    const envArgs = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+    // `-e NAME` (name only) forwards each value from the docker CLI's own environment, which the
+    // spawn seam sets to this same resolved env. Emitting `-e NAME=VALUE` instead would leak secrets
+    // onto the host process table (ps auxww, /proc/<pid>/cmdline) for the life of the run.
+    const envArgs = Object.keys(opts.env ?? {}).flatMap((k) => ['-e', k]);
     return ['docker', 'run', '--rm', '--network', 'none', ...mountArgs, ...envArgs, spec.image, ...(spec.cmd ?? [])];
 }
 
@@ -118,10 +123,13 @@ export function buildDockerArgv(
  *  resolveExecEnv (#C7) forwards capability-scoped env. The `claude` capability mounts the host's
  *  ~/.claude into the container so a containerized `claude` step reuses the host login — a
  *  deliberately longer-lived hole (host credentials cross the isolation boundary) the capability
- *  gates. Kept separate from buildDockerArgv so that stays a pure function of its arguments. */
+ *  gates. The mount is read-only: the login only needs to be read, and a writable path back to
+ *  ~/.claude would let a compromised image plant a settings.json hook or rewrite credentials on the
+ *  host. Kept separate from buildDockerArgv so that stays a pure function of its arguments. */
 export function dockerCapabilityMounts(): DockerMount[] {
     const mounts: DockerMount[] = [];
-    if (hasCapability('claude')) mounts.push({ host: join(homedir(), '.claude'), container: '/root/.claude' });
+    if (hasCapability('claude'))
+        mounts.push({ host: join(homedir(), '.claude'), container: '/root/.claude', readonly: true });
     return mounts;
 }
 
