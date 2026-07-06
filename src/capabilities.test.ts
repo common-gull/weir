@@ -72,6 +72,27 @@ test('resolveExecEnv passes HOME through as an operational baseline, not a crede
     expect(env.GH_TOKEN).toBeUndefined(); // no credential capability, so the secret is still withheld
 });
 
+test('resolveExecEnv forwards non-secret operational vars (locale, tz, tmpdir, proxy) unconditionally', () => {
+    // These aren't credentials, so they pass through even for a step declaring no credential capability;
+    // withholding them silently changed behavior (locale-parsed output, temp location, proxy routing —
+    // the last of which a 'network'-holding step needs to reach the network in a proxied deployment).
+    const env = withCapabilities({ workflow: 'w', caps: new Set(['host-exec']) }, () =>
+        resolveExecEnv({
+            PATH: '/usr/bin',
+            LANG: 'en_US.UTF-8',
+            TZ: 'UTC',
+            TMPDIR: '/scratch',
+            HTTPS_PROXY: 'http://proxy:3128',
+            GH_TOKEN: 'gh-secret',
+        }),
+    );
+    expect(env.LANG).toBe('en_US.UTF-8');
+    expect(env.TZ).toBe('UTC');
+    expect(env.TMPDIR).toBe('/scratch');
+    expect(env.HTTPS_PROXY).toBe('http://proxy:3128');
+    expect(env.GH_TOKEN).toBeUndefined(); // still no credential capability, so the secret stays withheld
+});
+
 test('resolveExecEnv forwards only the credential vars a declared capability names', () => {
     const env = resolveWith(['host-exec', 'gh-pr']);
     expect(env.GH_TOKEN).toBe('gh-secret'); // gh-pr authorizes GH_TOKEN…

@@ -116,16 +116,35 @@ const CAP_ENV: Partial<Record<Capability, readonly string[]>> = {
     'git-push': ['GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK'],
 };
 
-/** Non-secret operational vars passed through unconditionally. Without PATH the runtime interpreter
- *  (bun/python3) can't even be located; without HOME, git/ssh and the runtimes can't resolve their
- *  per-user config and caches — ~/.gitconfig (user identity, credential.helper, the safe.directory
- *  allowlist git now requires), ~/.ssh/known_hosts, ~/.config/gh, ~/.bun — so a step declaring
- *  git-push would forward the credential yet still fail to run git. Neither names a credential, so
- *  forwarding them leaks no grant; and since the child already runs as the daemon's user with full
- *  filesystem access (the process runtime has no fs sandbox — that's Docker's job, C8), withholding
- *  HOME would only break tooling, not withhold a secret. They're an operational baseline, not an
- *  exception to the withholding of secrets. */
-const BASE_EXEC_ENV: readonly string[] = ['PATH', 'HOME'];
+/** Non-secret operational vars passed through unconditionally, regardless of declared capabilities.
+ *  None names a credential, so forwarding them leaks no grant — but existing steps rely on them, and
+ *  withholding them silently changes behavior rather than protecting a secret (the child already runs
+ *  as the daemon's user with full filesystem access — the process runtime has no fs sandbox, that's
+ *  Docker's job, C8 — so withholding any of these only breaks tooling). Specifically:
+ *  - PATH: without it the runtime interpreter (bun/python3) can't even be located.
+ *  - HOME: git/ssh and the runtimes resolve their per-user config and caches through it — ~/.gitconfig
+ *    (user identity, credential.helper, the safe.directory allowlist git now requires),
+ *    ~/.ssh/known_hosts, ~/.config/gh, ~/.bun — so a step declaring git-push would forward the
+ *    credential yet still fail to run git.
+ *  - LANG/LC_ALL/TZ: locale- and timezone-dependent output (collation, number/date formatting) that an
+ *    existing step may parse; dropping them shifts the child to the C/POSIX locale and system TZ.
+ *  - TMPDIR: the scratch location a step expects.
+ *  - HTTP(S)_PROXY/NO_PROXY (both cases, since tools disagree on casing): outbound routing — without it
+ *    a step that holds 'network' loses connectivity in a proxied deployment despite holding the cap. */
+const BASE_EXEC_ENV: readonly string[] = [
+    'PATH',
+    'HOME',
+    'LANG',
+    'LC_ALL',
+    'TZ',
+    'TMPDIR',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'NO_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'no_proxy',
+];
 
 /** Build the minimal environment for an exec-step subprocess from the *ambient* capability grants
  *  (the set `withCapabilities` opened for the running workflow). Copies from `source` (the daemon env
