@@ -62,6 +62,16 @@ test('resolveExecEnv withholds daemon secrets from a step declaring no credentia
     expect(env.PATH).toBe('/usr/bin'); // the operational baseline still passes through
 });
 
+test('resolveExecEnv passes HOME through as an operational baseline, not a credential', () => {
+    // HOME lets git/ssh and the runtimes resolve their per-user config (~/.gitconfig, ~/.ssh, ~/.bun);
+    // it names no secret, so it forwards even for a step declaring no credential capability.
+    const env = withCapabilities({ workflow: 'w', caps: new Set(['host-exec']) }, () =>
+        resolveExecEnv({ PATH: '/usr/bin', HOME: '/home/weir', GH_TOKEN: 'gh-secret' }),
+    );
+    expect(env.HOME).toBe('/home/weir');
+    expect(env.GH_TOKEN).toBeUndefined(); // no credential capability, so the secret is still withheld
+});
+
 test('resolveExecEnv forwards only the credential vars a declared capability names', () => {
     const env = resolveWith(['host-exec', 'gh-pr']);
     expect(env.GH_TOKEN).toBe('gh-secret'); // gh-pr authorizes GH_TOKEN…

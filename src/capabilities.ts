@@ -116,10 +116,16 @@ const CAP_ENV: Partial<Record<Capability, readonly string[]>> = {
     'git-push': ['GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK'],
 };
 
-/** Non-secret vars passed through unconditionally: without PATH the runtime interpreter (bun/python3)
- *  can't even be located, so no step could run. It names no credential, so forwarding it leaks no
- *  grant — it's an operational necessity, not an exception to the withholding of secrets. */
-const BASE_EXEC_ENV: readonly string[] = ['PATH'];
+/** Non-secret operational vars passed through unconditionally. Without PATH the runtime interpreter
+ *  (bun/python3) can't even be located; without HOME, git/ssh and the runtimes can't resolve their
+ *  per-user config and caches — ~/.gitconfig (user identity, credential.helper, the safe.directory
+ *  allowlist git now requires), ~/.ssh/known_hosts, ~/.config/gh, ~/.bun — so a step declaring
+ *  git-push would forward the credential yet still fail to run git. Neither names a credential, so
+ *  forwarding them leaks no grant; and since the child already runs as the daemon's user with full
+ *  filesystem access (the process runtime has no fs sandbox — that's Docker's job, C8), withholding
+ *  HOME would only break tooling, not withhold a secret. They're an operational baseline, not an
+ *  exception to the withholding of secrets. */
+const BASE_EXEC_ENV: readonly string[] = ['PATH', 'HOME'];
 
 /** Build the minimal environment for an exec-step subprocess from the *ambient* capability grants
  *  (the set `withCapabilities` opened for the running workflow). Copies from `source` (the daemon env
