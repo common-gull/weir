@@ -29,8 +29,25 @@ async function artifactDeps(): Promise<RunDeps> {
 }
 
 const nodeStep = fileURLToPath(new URL('./exec/testdata/node-step.ts', import.meta.url));
+const nodeEnv = fileURLToPath(new URL('./exec/testdata/node-env.ts', import.meta.url));
 const writer = fileURLToPath(new URL('./exec/testdata/artifact-writer.ts', import.meta.url));
 const reader = fileURLToPath(new URL('./exec/testdata/artifact-reader.ts', import.meta.url));
+
+// Run `fn` with sentinel secrets planted in the daemon env (resolveExecEnv reads process.env), then
+// restore — so an exec step's observed env can be asserted against what the policy actually forwards.
+async function withDaemonSecrets<T>(fn: () => Promise<T>): Promise<T> {
+    const prev = { GH_TOKEN: process.env.GH_TOKEN, WEIR_ENV_SNOOP: process.env.WEIR_ENV_SNOOP };
+    process.env.GH_TOKEN = 'gh-secret-xyz';
+    process.env.WEIR_ENV_SNOOP = 'daemon-only';
+    try {
+        return await fn();
+    } finally {
+        for (const [k, v] of Object.entries(prev)) {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+        }
+    }
+}
 
 const stepNames = (runId: string) =>
     (db.query(`SELECT key FROM steps WHERE run_id = ? ORDER BY seq`).all(runId) as { key: string }[]).map((r) => r.key);
@@ -377,6 +394,32 @@ test('ctx.step spec: a retry replays the memoized exec result without re-running
     const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
     expect(JSON.parse(run.result)).toEqual({ echoed: { n: 1 }, from: 'node' });
 }, 20_000);
+
+test('ctx.step spec: a step with no credential capability runs with a secret-free env', async () => {
+    await withDaemonSecrets(async () => {
+        defineWorkflow('exec', { capabilities: ['host-exec'] }, (ctx) =>
+            ctx.step('probe-env', { runtime: 'node', module: nodeEnv }),
+        );
+        const id = createRun(db, 'exec');
+        expect(await executeRun(db, id)).toBe('completed');
+        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+        // The child sees neither the gh token nor the arbitrary daemon var — only the PATH baseline.
+        expect(JSON.parse(run.result)).toEqual({ GH_TOKEN: null, SNOOP: null, hasPath: true });
+    });
+}, 15_000);
+
+test('ctx.step spec: a step declaring gh-pr receives GH_TOKEN (only) in its env', async () => {
+    await withDaemonSecrets(async () => {
+        defineWorkflow('exec', { capabilities: ['host-exec', 'gh-pr'] }, (ctx) =>
+            ctx.step('probe-env', { runtime: 'node', module: nodeEnv }),
+        );
+        const id = createRun(db, 'exec');
+        expect(await executeRun(db, id)).toBe('completed');
+        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+        // gh-pr forwards GH_TOKEN, but no other daemon secret rides along.
+        expect(JSON.parse(run.result)).toEqual({ GH_TOKEN: 'gh-secret-xyz', SNOOP: null, hasPath: true });
+    });
+}, 15_000);
 
 test('retryRun --from matches step names exactly (no substring over-delete)', async () => {
     const ran: string[] = [];
