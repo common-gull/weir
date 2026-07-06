@@ -14,7 +14,12 @@ import { loadConfig, type WeirConfig } from './config.ts';
 import { doctor } from './doctor.ts';
 
 function makeExecutor(db: DB, cfg: WeirConfig): Executor {
-    return new Executor(db, { maxConcurrent: cfg.maxConcurrent, pools: cfg.pools });
+    return new Executor(db, {
+        maxConcurrent: cfg.maxConcurrent,
+        pools: cfg.pools,
+        storeDir: cfg.storeDir,
+        scratchDir: cfg.scratchDir,
+    });
 }
 
 async function cmdStart(cfg: WeirConfig): Promise<void> {

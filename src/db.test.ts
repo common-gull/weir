@@ -1,4 +1,8 @@
 import { expect, test, beforeEach } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { openDb, pruneHistory, assertSerializable, type DB } from './db.ts';
 import { clearRegistry, defineWorkflow, executeRun } from './engine.ts';
 import { createRun } from './runs.ts';
@@ -63,6 +67,32 @@ test('newest-first run listing is served by ix_runs_created without a temp b-tre
     const detail = plan.map((r) => r.detail).join('\n');
     expect(detail).toContain('ix_runs_created');
     expect(detail).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+});
+
+test('openDb backfills the steps.artifacts column on a database created before it existed', async () => {
+    const path = join(tmpdir(), `weir-migrate-${crypto.randomUUID()}.db`);
+    try {
+        // A `steps` table as it was before the artifacts column was added to SCHEMA.
+        const legacy = new Database(path, { create: true });
+        legacy.run(`CREATE TABLE steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, seq INTEGER NOT NULL,
+            key TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+            result TEXT, error TEXT, child_run_id TEXT, created_at INTEGER NOT NULL)`);
+        legacy.close();
+
+        const migrated = openDb(path);
+        const cols = (migrated.query(`PRAGMA table_info(steps)`).all() as { name: string }[]).map((c) => c.name);
+        expect(cols).toContain('artifacts');
+
+        // The write path that previously crashed with "no column named artifacts" now succeeds.
+        clearRegistry();
+        defineWorkflow('m', {}, (ctx) => ctx.step('hello', () => 42));
+        const id = createRun(migrated, 'm');
+        expect(await executeRun(migrated, id)).toBe('completed');
+        migrated.close();
+    } finally {
+        await Promise.all([path, `${path}-wal`, `${path}-shm`].map((p) => rm(p, { force: true })));
+    }
 });
 
 test('pruneHistory clears expired kv', () => {

@@ -11,10 +11,12 @@
 // (which ARE memoized). A memo hit whose key doesn't match the current call is a divergence
 // and throws rather than silently corrupting history.
 
+import { mkdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
 import { requireCapability, withCapabilities } from './capabilities.ts';
-import { buildArgv } from './exec/runtime.ts';
+import { buildArgv, snapshotOutputs, stageInputs } from './exec/runtime.ts';
 import { runProtocol } from './exec/spawn.ts';
 import {
     SkipSignal,
@@ -23,6 +25,7 @@ import {
     type LoopCtx,
     type LoopOpts,
     type RunRow,
+    type StepArtifacts,
     type StepCtx,
     type StepKind,
     type StepOpts,
@@ -108,6 +111,10 @@ export interface RunDeps {
     signal?: AbortSignal;
     /** Recursively execute a child run to completion and return its result. */
     runChild?(childRunId: string): Promise<unknown>;
+    /** Content-addressed artifact store dir (#C4) for spec-step outputs. Defaults under `.weir/`. */
+    storeDir?: string;
+    /** Root under which each artifact-staging spec step gets an isolated scratch dir. */
+    scratchDir?: string;
 }
 
 interface Replay {
@@ -136,11 +143,22 @@ function writeMemo(
     kind: StepKind,
     result: unknown,
     childRunId?: string | null,
+    artifacts?: StepArtifacts | null,
 ): void {
     db.query(
-        `INSERT INTO steps (run_id, seq, key, name, kind, status, result, error, child_run_id, created_at)
-     VALUES (?, ?, ?, ?, ?, 'completed', ?, NULL, ?, ?)`,
-    ).run(runId, seq, key, name, kind, toJson(result), childRunId ?? null, Date.now());
+        `INSERT INTO steps (run_id, seq, key, name, kind, status, result, error, child_run_id, artifacts, created_at)
+     VALUES (?, ?, ?, ?, ?, 'completed', ?, NULL, ?, ?, ?)`,
+    ).run(
+        runId,
+        seq,
+        key,
+        name,
+        kind,
+        toJson(result),
+        childRunId ?? null,
+        artifacts ? toJson(artifacts) : null,
+        Date.now(),
+    );
 }
 
 function computeBackoff(attempt: number, b: NonNullable<StepOpts['retries']>['backoff']): number {
@@ -261,7 +279,7 @@ function buildCtx(
         kind: StepKind,
         name: string,
         key: string,
-        produce: (seq: number) => Promise<{ value: T; childRunId?: string }>,
+        produce: (seq: number) => Promise<{ value: T; childRunId?: string; artifacts?: StepArtifacts }>,
     ): Promise<T> {
         if (signal.aborted) throw new CancelledError('cancelled');
         const seq = state.seq++;
@@ -275,9 +293,9 @@ function buildCtx(
             }
             return fromJson<T>(hit.result) as T;
         }
-        const { value, childRunId } = await produce(seq);
+        const { value, childRunId, artifacts } = await produce(seq);
         assertSerializable(value, key);
-        writeMemo(db, runId, seq, key, name, kind, value, childRunId);
+        writeMemo(db, runId, seq, key, name, kind, value, childRunId, artifacts);
         return value;
     }
 
@@ -390,20 +408,43 @@ function buildCtx(
 
     // Exec-runtime step (rung-1): run the module in a subprocess (C2) via a runtime-specific argv
     // (C3) instead of an in-process closure. Streamed log lines surface as step.log events like the
-    // closure step's log channel. JSON result only.
-    async function runExecStep<T>(seq: number, spec: StepSpec, opts: StepOpts<T>): Promise<T> {
-        const out = await runProtocol({
-            argv: buildArgv(spec),
-            input: opts.input,
-            signal,
-            timeoutMs: opts.timeout,
-            onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
-        });
-        if (!out.ok) throw new Error(out.error);
-        return out.result as T;
+    // closure step's log channel. When the spec declares inputs/outputs the step runs in an isolated
+    // scratch dir (#C6): declared input artifacts are staged in from the store beforehand and declared
+    // outputs snapshotted back into it afterward, their `path -> hash` map returned alongside the
+    // module's JSON result. The scratch dir is torn down once outputs are safely content-addressed.
+    async function runExecStep(
+        seq: number,
+        spec: StepSpec,
+        opts: StepOpts,
+    ): Promise<{ result: unknown; artifacts: StepArtifacts }> {
+        const inputs = spec.inputs ?? [];
+        const outputs = spec.outputs ?? [];
+        const storeDir = deps.storeDir ?? join(process.cwd(), '.weir', 'artifacts');
+        let scratch: string | undefined;
+        try {
+            if (inputs.length > 0 || outputs.length > 0) {
+                scratch = join(deps.scratchDir ?? join(process.cwd(), '.weir', 'scratch'), runId, String(seq));
+                await mkdir(scratch, { recursive: true });
+                await stageInputs(storeDir, scratch, inputs);
+            }
+            const out = await runProtocol({
+                argv: buildArgv(spec),
+                cwd: scratch,
+                input: opts.input,
+                signal,
+                timeoutMs: opts.timeout,
+                onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
+            });
+            if (!out.ok) throw new Error(out.error);
+            const artifacts =
+                scratch && outputs.length > 0 ? await snapshotOutputs(db, storeDir, scratch, outputs) : {};
+            return { result: out.result, artifacts };
+        } finally {
+            if (scratch) await rm(scratch, { recursive: true, force: true });
+        }
     }
 
-    const execStepImpl = <T>(name: string, spec: StepSpec, opts: StepOpts<T>): Promise<T> => {
+    const execStepImpl = (name: string, spec: StepSpec, opts: StepOpts): Promise<unknown> => {
         // A rung-1 exec step spawns an arbitrary module in a subprocess on the host with no
         // isolation — the same unsandboxed host-code-execution privilege as runUnsafelyOnHost — so
         // gate it on the same 'host-exec' capability. Like runUnsafelyOnHost, the gate runs before
@@ -411,16 +452,22 @@ function buildCtx(
         requireCapability('host-exec');
         const ord = bump(state.ordinals, name);
         const key = opts.key ?? `${name}#${ord}`;
-        return memoized<T>('exec', name, key, async (seq) => ({ value: await runExecStep<T>(seq, spec, opts) }));
+        // A spec declaring outputs resolves to { result, artifacts }; otherwise the bare module result
+        // (backward-compatible). The artifacts map is also mirrored into the memo's `artifacts` column.
+        const wantsArtifacts = (spec.outputs?.length ?? 0) > 0;
+        return memoized('exec', name, key, async (seq) => {
+            const { result, artifacts } = await runExecStep(seq, spec, opts);
+            return wantsArtifacts ? { value: { result, artifacts }, artifacts } : { value: result };
+        });
     };
 
     // `ctx.step` overload dispatch: a closure runs in-process (unchanged); a spec routes to the exec
     // runtime. Discriminated by `typeof arg2 === 'function'`.
-    const stepDispatch = <T>(
+    const stepDispatch = (
         name: string,
-        arg2: ((s: StepCtx) => T | Promise<T>) | StepSpec,
-        opts: StepOpts<T> = {},
-    ): Promise<T> => (typeof arg2 === 'function' ? stepImpl(name, arg2, opts) : execStepImpl(name, arg2, opts));
+        arg2: ((s: StepCtx) => unknown) | StepSpec,
+        opts: StepOpts = {},
+    ): Promise<unknown> => (typeof arg2 === 'function' ? stepImpl(name, arg2, opts) : execStepImpl(name, arg2, opts));
 
     const ctx: Ctx = {
         runId,
@@ -428,7 +475,7 @@ function buildCtx(
         input,
         capabilities: caps,
 
-        step: stepDispatch,
+        step: stepDispatch as Ctx['step'],
 
         // The host escape hatch: identical in-process execution to `step`, gated loudly on
         // 'host-exec'. The gate runs before any seq is consumed, so a denied call throws without
