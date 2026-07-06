@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS steps (
   error        TEXT,
   child_run_id TEXT,
   artifacts    TEXT,
+  image_digest TEXT,
   created_at   INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_steps_seq ON steps(run_id, seq);
@@ -139,6 +140,7 @@ export function openDb(path: string): DB {
  *  no `ADD COLUMN IF NOT EXISTS`, so guard each add on the live table's columns. */
 function migrate(db: DB): void {
     addColumn(db, 'steps', 'artifacts', 'TEXT');
+    addColumn(db, 'steps', 'image_digest', 'TEXT');
 }
 
 /** Add `column` to `table` if the live schema lacks it. Names are trusted literals, not input. */

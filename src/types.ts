@@ -194,6 +194,8 @@ export interface StepRow {
     child_run_id: string | null;
     /** JSON `{path: sha256}` map of artifacts a spec step snapshotted into the store, else null. */
     artifacts: string | null;
+    /** `sha256:…` image digest a docker exec step (#C8) was pinned to — its replay identity — else null. */
+    image_digest: string | null;
     created_at: number;
 }
 
