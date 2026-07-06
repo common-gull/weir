@@ -102,7 +102,8 @@ function mountArg(m: DockerMount): string {
  *  values stay off the host process table), and any
  *  extra mounts (e.g. the claude capability's ~/.claude, see dockerCapabilityMounts) are all passed
  *  in, so the whole argv is a deterministic function of its inputs and unit-testable without Docker.
- *  Defaults to `--network none` and `--rm`: a step gets no egress and leaves no stopped container. */
+ *  Defaults to `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped
+ *  container, and keeps stdin open so its C1 input frame reaches the module. */
 export function buildDockerArgv(
     spec: DockerStepSpec,
     opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[] },
@@ -116,7 +117,20 @@ export function buildDockerArgv(
     // spawn seam sets to this same resolved env. Emitting `-e NAME=VALUE` instead would leak secrets
     // onto the host process table (ps auxww, /proc/<pid>/cmdline) for the life of the run.
     const envArgs = Object.keys(opts.env ?? {}).flatMap((k) => ['-e', k]);
-    return ['docker', 'run', '--rm', '--network', 'none', ...mountArgs, ...envArgs, spec.image, ...(spec.cmd ?? [])];
+    // `-i` keeps the container's stdin open and forwarded so the module can read its C1 input frame;
+    // without it docker closes stdin immediately and every containerized step sees EOF instead.
+    return [
+        'docker',
+        'run',
+        '--rm',
+        '-i',
+        '--network',
+        'none',
+        ...mountArgs,
+        ...envArgs,
+        spec.image,
+        ...(spec.cmd ?? []),
+    ];
 }
 
 /** Extra bind mounts a step's *ambient* capabilities open into its container, mirroring how

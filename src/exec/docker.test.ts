@@ -16,6 +16,7 @@ test('buildDockerArgv defaults to no network and mounts the scratch dir at /weir
         'docker',
         'run',
         '--rm',
+        '-i',
         '--network',
         'none',
         '-v',
@@ -30,7 +31,7 @@ test('buildDockerArgv forwards env by name as -e NAME and appends the cmd after 
         { image, cmd: ['python3', '/weir/step.py'] },
         { scratch: '/s', env: { GH_TOKEN: 'secret', PATH: '/usr/bin' } },
     );
-    expect(argv.slice(0, 7)).toEqual(['docker', 'run', '--rm', '--network', 'none', '-v', '/s:/weir']);
+    expect(argv.slice(0, 8)).toEqual(['docker', 'run', '--rm', '-i', '--network', 'none', '-v', '/s:/weir']);
     const eIdx = argv.indexOf('-e');
     // name-only references — docker reads the value from its own env, so no secret lands in argv.
     expect(argv.slice(eIdx, eIdx + 4)).toEqual(['-e', 'GH_TOKEN', '-e', 'PATH']);
