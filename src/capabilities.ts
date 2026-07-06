@@ -97,3 +97,44 @@ defineCapability(
 // traffic passes through). Seeded so it's a *known* capability, for a workflow or lib/ tool that
 // gates its own network calls — e.g. lib/slack.ts gates its fetch on its own 'slack' capability.
 defineCapability('network', 'make arbitrary outbound network requests (self-gated; not centrally enforced)');
+
+// ---- exec-step env policy ----
+// The capability declaration doubles as the credential-injection policy for exec-step subprocesses
+// (issue #30). A rung-1 exec step would otherwise inherit the daemon's *entire* environment — every
+// token the daemon holds — so instead we hand the child a minimal env built from its ambient grants:
+// only the credential vars its declared capabilities name, plus a tiny operational baseline. A step
+// that declares no credential capability therefore sees none of the daemon's secrets. This is the
+// process runtime's only isolation lever; network-namespace isolation and secret mounts are Docker's
+// (C8). Note 'host-exec' — required to run any exec step — is deliberately absent from CAP_ENV: it
+// authorizes spawning host code, not inheriting the daemon's credentials.
+
+/** Each capability → the daemon env vars it authorizes forwarding to a step's subprocess. A
+ *  capability not listed here (host-exec, network) contributes no credentials of its own. */
+const CAP_ENV: Partial<Record<Capability, readonly string[]>> = {
+    'gh-pr': ['GH_TOKEN', 'GITHUB_TOKEN'],
+    'gh-comment': ['GH_TOKEN', 'GITHUB_TOKEN'],
+    'git-push': ['GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK'],
+};
+
+/** Non-secret vars passed through unconditionally: without PATH the runtime interpreter (bun/python3)
+ *  can't even be located, so no step could run. It names no credential, so forwarding it leaks no
+ *  grant — it's an operational necessity, not an exception to the withholding of secrets. */
+const BASE_EXEC_ENV: readonly string[] = ['PATH'];
+
+/** Build the minimal environment for an exec-step subprocess from the *ambient* capability grants
+ *  (the set `withCapabilities` opened for the running workflow). Copies from `source` (the daemon env
+ *  by default) only the operational baseline plus the credential vars the declared capabilities
+ *  authorize — so a step that declares nothing inherits none of the daemon's secrets. */
+export function resolveExecEnv(source: Record<string, string | undefined> = process.env): Record<string, string> {
+    const env: Record<string, string> = {};
+    const pass = (name: string) => {
+        const value = source[name];
+        if (value !== undefined) env[name] = value;
+    };
+    for (const name of BASE_EXEC_ENV) pass(name);
+    for (const cap of Object.keys(CAP_ENV) as Capability[]) {
+        if (!hasCapability(cap)) continue;
+        for (const name of CAP_ENV[cap] ?? []) pass(name);
+    }
+    return env;
+}

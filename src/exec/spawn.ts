@@ -43,6 +43,10 @@ export interface RunProtocolOpts {
     maxStderrLineBytes?: number;
     /** Receives each stderr line as a log frame; unstructured lines arrive as info-level frames. */
     onLog?: (frame: LogFrame) => void;
+    /** Environment for the child. When set it *replaces* the daemon's env (Bun does not merge), so the
+     *  caller decides exactly what the subprocess can see — see `resolveExecEnv` for the capability
+     *  policy. Omitted, the child inherits the daemon's full environment (the runner's raw default). */
+    env?: Record<string, string>;
 }
 
 /** Split a byte stream into lines and hand each to `onLine` (a trailing partial line is emitted too).
@@ -138,7 +142,7 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
 
     const inputFrame = encodeInput(input); // may throw ProtocolError for non-JSON input — before we spawn
 
-    const proc = Bun.spawn(argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' });
+    const proc = Bun.spawn(argv, { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', env: opts.env });
     try {
         proc.stdin.write(inputFrame);
         proc.stdin.end();

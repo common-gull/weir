@@ -13,7 +13,7 @@
 
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { requireCapability, withCapabilities } from './capabilities.ts';
+import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
 import { buildArgv } from './exec/runtime.ts';
 import { runProtocol } from './exec/spawn.ts';
 import {
@@ -395,6 +395,9 @@ function buildCtx(
         const out = await runProtocol({
             argv: buildArgv(spec),
             input: opts.input,
+            // Only the daemon env vars the workflow's declared capabilities authorize — never the
+            // daemon's full environment. See resolveExecEnv for the capability → var policy.
+            env: resolveExecEnv(),
             signal,
             timeoutMs: opts.timeout,
             onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
