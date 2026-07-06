@@ -61,11 +61,12 @@ balloons the hand-written stylesheet). `ui` is a Bun workspace, so root scripts 
 ## Privacy — do not leak local or internal details
 
 The user's real workflows and shared code are personal and gitignored (`workflows/*` except
-`example.ts`, `lib/*` except `README.md`, plus `*.db`, `.weir/`, `.env`). Treat their contents as
-private.
+`example.ts` and its step modules under `workflows/steps/`, `lib/*` except `README.md`, plus `*.db`,
+`.weir/`, `.env`). Treat their contents as private.
 
 - Never commit or track personal files: keep changes to tracked, generic code (`src/`, `ui/`,
-  `workflows/example.ts`, docs). Do not add real workflows, `lib/` modules, databases, or secrets.
+  `workflows/example.ts`, `workflows/steps/`, docs). Do not add real workflows, `lib/` modules,
+  databases, or secrets.
 - Never expose internal specifics — private workflow names/logic, gitignored file contents, local
   paths, host details, credentials — in **commit messages, PR titles/descriptions, or issues**.
   Describe changes in terms of the public, tracked code only.
@@ -75,7 +76,8 @@ private.
 - `src/` — engine core: `engine.ts`, `executor.ts`, `scheduler.ts`, `cron.ts`, `runs.ts`, `db.ts`,
   `capabilities.ts`, `api/server.ts`, `cli.ts`.
 - `src/tools/` — generic primitives usable by workflows (`git`, `gh`, `claude`, `fs`, `notify`, …).
-- `workflows/` — workflow definitions (only `example.ts` is tracked).
+- `workflows/` — workflow definitions (only `example.ts`, its test, and the exec-step modules under
+  `workflows/steps/` are tracked).
 - `lib/` — shared helpers/modules for workflows (only `README.md` is tracked).
 - `ui/` — SvelteKit web UI.
 

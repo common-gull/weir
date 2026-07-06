@@ -12,15 +12,36 @@
 // catch a child that streams unbounded output without retaining it — its own resident memory stays
 // low while it buffers the parent toward an OOM — so the daemon caps both pipes directly.
 //
-// The RSS poll reuses src/tools/isolate.ts's soft, portable memory cap (reactive, not enforced by
-// the kernel) that trades a hard guarantee for uniform behavior across OSes — the right call for
-// buggy, not hostile, code.
+// The RSS poll (readRssBytes, below) is a soft, portable memory cap — reactive, not kernel-enforced —
+// that trades a hard guarantee for uniform behavior across OSes, the right call for buggy, not
+// hostile, code. A real kernel-enforced limit is Docker's job (C8).
 
-import { readRssBytes } from '../tools/isolate.ts';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { decodeOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
 
 const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_STDERR_LINE_BYTES = 1024 * 1024;
+
+/** Read a process's resident memory in bytes. /proc on Linux; `ps` fallback on other Unix. */
+function readRssBytes(pid: number): number {
+    try {
+        const resident = Number(readFileSync(`/proc/${pid}/statm`, 'utf8').trim().split(/\s+/)[1]);
+        if (Number.isFinite(resident)) return resident * 4096;
+    } catch {
+        /* not Linux, or gone */
+    }
+    try {
+        const out = execFileSync('ps', ['-o', 'rss=', '-p', String(pid)], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+        })
+            .toString()
+            .trim();
+        return Number(out) * 1024;
+    } catch {
+        return 0;
+    }
+}
 
 export interface RunProtocolOpts {
     /** Command line to spawn; `argv[0]` is the executable. Constructed by the caller (C3/C8). */

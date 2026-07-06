@@ -13,8 +13,8 @@ beforeEach(() => {
 test('resource pool bounds concurrency to the pool size', async () => {
     let cur = 0;
     let max = 0;
-    defineWorkflow('t', {}, async (ctx) => {
-        await ctx.step(
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost(
             'work',
             async () => {
                 cur++;
@@ -42,8 +42,8 @@ test('resource pool bounds concurrency to the pool size', async () => {
 test('global cap bounds total concurrent runs', async () => {
     let cur = 0;
     let max = 0;
-    defineWorkflow('t', {}, async (ctx) => {
-        await ctx.step('work', async () => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost('work', async () => {
             cur++;
             max = Math.max(max, cur);
             await new Promise((r) => setTimeout(r, 20));

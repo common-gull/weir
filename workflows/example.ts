@@ -2,8 +2,8 @@ import { defineWorkflow } from '../src/engine.ts';
 
 // A minimal example. Copy this file and edit it to make your own workflow.
 //
-// Each `ctx.step` runs once and its result is saved, so if the run fails partway
-// through, `weir retry <id>` picks up from the step that failed.
+// Each step runs once and its result is saved, so if the run fails partway through,
+// `weir retry <id>` picks up from the step that failed.
 //
 // Two tiers of execution, both memoized identically:
 //   * `ctx.step(name, spec)` is the default — an exec step. The work lives in its own module
