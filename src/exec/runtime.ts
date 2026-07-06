@@ -1,13 +1,16 @@
-// Rung-1 of the step-distribution ladder (docs/containerized-steps.md): map a step spec to a
-// local-process argv the C2 runner (src/exec/spawn.ts) executes — no Docker. A `runtime` names a
-// pinned language shim (src/exec/shims/*) that speaks the C1 protocol, so an author ships just a
+// Rungs 1 and 2 of the step-distribution ladder (docs/containerized-steps.md): map a step spec to
+// the argv the C2 runner (src/exec/spawn.ts) executes. Rung-1 is a local process — a `runtime` names
+// a pinned language shim (src/exec/shims/*) that speaks the C1 protocol, so an author ships just a
 // module (`export default (input) => output` for node, `def step(input): return output` for python)
-// and weir wires the protocol around it. The docker runtime and image-by-digest pinning are C8.
+// and weir wires the protocol around it. Rung-2 (buildDockerArgv, below) is a `docker run` on the
+// same spawn seam, with image-by-digest pinning in src/exec/docker.ts.
 
 import { copyFile, mkdir } from 'node:fs/promises';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getArtifact, putArtifact } from '../artifacts.ts';
+import { hasCapability } from '../capabilities.ts';
 import type { DB } from '../db.ts';
 
 export type Runtime = 'node' | 'python';
@@ -58,6 +61,90 @@ export function buildArgv(spec: LocalStepSpec): string[] {
     }
     const module = isAbsolute(spec.module) ? spec.module : resolve(spec.module);
     return [...shimArgv(spec.runtime), module];
+}
+
+// ---- rung-2: docker runtime (#C8) ----
+//
+// The container rung of the ladder. Same spawn seam as rung-1 — the C2 runner (src/exec/spawn.ts)
+// runs the argv and speaks the C1 protocol over the child's stdio — but the child is a `docker run`
+// rather than a local interpreter. The container is locked down by default: `--network none` (no
+// egress) and only the per-step scratch dir bind-mounted at /weir, so the module sees its staged
+// inputs and writes its outputs there and nothing else of the host. Credentials reach it the same
+// capability-scoped way rung-1 gets them (resolveExecEnv, #C7), forwarded by name (`-e NAME`, so the
+// value comes from the docker CLI's env and never lands on the host process table); the image is
+// pinned by digest (src/exec/docker.ts) so a replay runs the exact bytes the first run did.
+
+/** A host→container bind mount. `readonly` maps to docker's `:ro` volume suffix. */
+export interface DockerMount {
+    host: string;
+    container: string;
+    readonly?: boolean;
+}
+
+export interface DockerStepSpec {
+    /** Image reference to run. Pin it by digest (`name@sha256:…`, see resolveImageDigest) so a
+     *  replay runs the exact image the first run did rather than whatever the tag now points at. */
+    image: string;
+    /** Command run in the container; overrides the image's default. The resulting process must speak
+     *  the C1 stdio protocol (read the input frame from stdin, write one output frame to stdout). */
+    cmd?: string[];
+    inputs?: ArtifactInput[];
+    outputs?: string[];
+}
+
+/** Render a bind mount as docker's `-v host:container[:ro]` value. */
+function mountArg(m: DockerMount): string {
+    return `${m.host}:${m.container}${m.readonly ? ':ro' : ''}`;
+}
+
+/** Build the `docker run` argv for a container step. Pure: the per-step scratch dir (bind-mounted at
+ *  /weir), the capability-scoped env (from resolveExecEnv, #C7, forwarded by name as `-e NAME` so
+ *  values stay off the host process table), and any
+ *  extra mounts (e.g. the claude capability's ~/.claude, see dockerCapabilityMounts) are all passed
+ *  in, so the whole argv is a deterministic function of its inputs and unit-testable without Docker.
+ *  Defaults to `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped
+ *  container, and keeps stdin open so its C1 input frame reaches the module. */
+export function buildDockerArgv(
+    spec: DockerStepSpec,
+    opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[] },
+): string[] {
+    if (typeof spec.image !== 'string' || spec.image.length === 0) {
+        throw new Error('docker step requires an image reference');
+    }
+    const mounts: DockerMount[] = [{ host: opts.scratch, container: '/weir' }, ...(opts.mounts ?? [])];
+    const mountArgs = mounts.flatMap((m) => ['-v', mountArg(m)]);
+    // `-e NAME` (name only) forwards each value from the docker CLI's own environment, which the
+    // spawn seam sets to this same resolved env. Emitting `-e NAME=VALUE` instead would leak secrets
+    // onto the host process table (ps auxww, /proc/<pid>/cmdline) for the life of the run.
+    const envArgs = Object.keys(opts.env ?? {}).flatMap((k) => ['-e', k]);
+    // `-i` keeps the container's stdin open and forwarded so the module can read its C1 input frame;
+    // without it docker closes stdin immediately and every containerized step sees EOF instead.
+    return [
+        'docker',
+        'run',
+        '--rm',
+        '-i',
+        '--network',
+        'none',
+        ...mountArgs,
+        ...envArgs,
+        spec.image,
+        ...(spec.cmd ?? []),
+    ];
+}
+
+/** Extra bind mounts a step's *ambient* capabilities open into its container, mirroring how
+ *  resolveExecEnv (#C7) forwards capability-scoped env. The `claude` capability mounts the host's
+ *  ~/.claude into the container so a containerized `claude` step reuses the host login — a
+ *  deliberately longer-lived hole (host credentials cross the isolation boundary) the capability
+ *  gates. The mount is read-only: the login only needs to be read, and a writable path back to
+ *  ~/.claude would let a compromised image plant a settings.json hook or rewrite credentials on the
+ *  host. Kept separate from buildDockerArgv so that stays a pure function of its arguments. */
+export function dockerCapabilityMounts(): DockerMount[] {
+    const mounts: DockerMount[] = [];
+    if (hasCapability('claude'))
+        mounts.push({ host: join(homedir(), '.claude'), container: '/root/.claude', readonly: true });
+    return mounts;
 }
 
 // ---- scratch staging (#C6) ----
