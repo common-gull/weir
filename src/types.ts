@@ -114,6 +114,9 @@ export interface Ctx {
      *  {@link step}. Only host-touching work belongs here — pure/transform work is a container `step`. */
     runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     loop<T>(opts: LoopOpts<T>, body: (it: LoopCtx) => T | Promise<T>): Promise<T>;
+    /** Fan out `fn` over `items` with bounded concurrency, each invocation memoized as its own step.
+     *  `fn` runs in-process on the host (the same unsandboxed privilege as {@link runUnsafelyOnHost}),
+     *  so `map` is gated on the 'host-exec' capability. */
     map<I, O>(
         items: I[],
         fn: (item: I, index: number) => O | Promise<O>,
@@ -152,9 +155,14 @@ export interface StepCtx {
 export interface LoopCtx {
     readonly index: number;
     readonly prev: unknown; // previous iteration's return value (undefined on first)
-    step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
+    /** A per-iteration container step — the loop-scoped counterpart of {@link Ctx.step}: a
+     *  `{ runtime, module }` spec the exec runtime runs in a subprocess, auto-namespaced per
+     *  iteration. Closures are no longer accepted — host-touching iteration work goes on
+     *  {@link LoopCtx.runUnsafelyOnHost}, and passing a function throws. */
+    step<T = unknown>(name: string, spec: StepSpecWithOutputs, opts?: StepOpts<T>): Promise<ExecResult<T>>;
+    step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
     /** Loop-scoped counterpart to `Ctx.runUnsafelyOnHost`: same per-iteration namespacing as
-     *  `step`, but runs on the host with full daemon privileges. Gated on 'host-exec'. */
+     *  `step`, but runs a closure on the host with full daemon privileges. Gated on 'host-exec'. */
     runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
 }
 

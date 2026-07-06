@@ -114,9 +114,9 @@ test('ctx.now() is memoized: stable across a retry', async () => {
 
 test('ctx.loop: bounded auto-iteration, fails twice then succeeds -> exactly 3 iterations', async () => {
     let attempts = 0;
-    defineWorkflow('t', {}, async (ctx) => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
         const out = await ctx.loop({ max: 5, until: (r: { ok: boolean }) => r.ok }, async (it) => {
-            const ok = (await it.step('try', () => {
+            const ok = (await it.runUnsafelyOnHost('try', () => {
                 attempts++;
                 return attempts >= 3;
             })) as boolean;
@@ -131,7 +131,7 @@ test('ctx.loop: bounded auto-iteration, fails twice then succeeds -> exactly 3 i
 });
 
 test('ctx.map: per-item isolation — one item fails, the rest succeed', async () => {
-    defineWorkflow('t', {}, async (ctx) => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
         return ctx.map([0, 1, 2, 3, 4], (n) => {
             if (n === 3) throw new Error('bad');
             return n * 10;
@@ -148,6 +148,22 @@ test('ctx.map: per-item isolation — one item fails, the rest succeed', async (
         { ok: false, error: 'bad' },
         { ok: true, value: 40 },
     ]);
+});
+
+test('ctx.map: denied without the host-exec capability — mapper never runs, no seq consumed', async () => {
+    let ran = false;
+    defineWorkflow('nomap', {}, async (ctx) => {
+        return ctx.map([1, 2, 3], (n) => {
+            ran = true;
+            return n;
+        });
+    });
+    const id = createRun(db, 'nomap');
+    expect(await executeRun(db, id)).toBe('failed'); // map runs host closures → needs host-exec
+    expect(ran).toBe(false); // gate throws before any item's mapper runs
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(run.error).toContain('host-exec');
+    expect(stepNames(id)).toEqual([]); // no seq consumed on a denied call
 });
 
 test('ctx.once: rate-limit window — first true, second false', async () => {
@@ -347,6 +363,49 @@ test('loop it.runUnsafelyOnHost: granted -> per-iteration key identical to it.st
     // Same key shape as it.step, so migrating it.step -> it.runUnsafelyOnHost is replay-stable.
     expect(stepNames(id)).toEqual(['loop#0:0:try', 'loop#0:1:try', 'loop#0:2:try']);
 });
+
+test('it.step(fn): a closure in a loop is rejected loudly — no in-process fallback, no seq consumed', async () => {
+    let ran = false;
+    defineWorkflow('loopclosure', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.loop({ max: 3, until: () => true }, async (it) => {
+            // The closure overload is gone at the type level; a JS caller that still passes a function
+            // hits the runtime guard rather than silently running in-process (a host-exec bypass).
+            const step = it.step as unknown as (name: string, fn: () => unknown) => Promise<unknown>;
+            await step('legacy', () => {
+                ran = true;
+                return 1;
+            });
+        });
+        return 'ok';
+    });
+    const id = createRun(db, 'loopclosure');
+    expect(await executeRun(db, id)).toBe('failed');
+    expect(ran).toBe(false); // the guard throws before the closure could run
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(run.error).toContain('it.runUnsafelyOnHost'); // points the caller at the loop host hatch
+    expect(stepNames(id)).toEqual([]); // thrown before any seq/memo is consumed
+});
+
+test('it.step spec: runs a container step per iteration in the exec runtime', async () => {
+    defineWorkflow('loopexec', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.loop({ max: 2 }, (it) => it.step('run', { runtime: 'node', module: nodeStep }, { input: { i: it.index } })),
+    );
+    const id = createRun(db, 'loopexec');
+    expect(await executeRun(db, id)).toBe('completed');
+
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({ echoed: { i: 1 }, from: 'node' }); // loop returns the last iteration
+
+    // Each iteration memoized under the 'exec' kind with the loop's per-iteration key.
+    const steps = db.query(`SELECT kind, key FROM steps WHERE run_id = ? ORDER BY seq`).all(id) as {
+        kind: string;
+        key: string;
+    }[];
+    expect(steps).toEqual([
+        { kind: 'exec', key: 'loop#0:0:run' },
+        { kind: 'exec', key: 'loop#0:1:run' },
+    ]);
+}, 20_000);
 
 test('ctx.step spec: denied without the host-exec capability, no subprocess spawned, no seq consumed', async () => {
     defineWorkflow('nohostexec', {}, async (ctx) => {
