@@ -66,12 +66,12 @@ test('encodeOutput rejects a non-serializable result', () => {
     expect(() => encodeOutput({ ok: true, result: { s: new Set([1]) } })).toThrow(/Set/);
 });
 
-test('decodeOutput reads frames the isolate runner writes', () => {
-    // Byte-for-byte what src/tools/isolate-runner.ts emits on stdout.
+test('decodeOutput reads the plain output frame a runtime shim writes', () => {
+    // Byte-for-byte what a shim (src/exec/shims/*) emits on stdout.
     expect(decodeOutput('{"ok":true,"result":42}')).toEqual({ ok: true, result: 42 });
-    expect(decodeOutput('{"ok":false,"error":"invalid isolate payload"}')).toEqual({
+    expect(decodeOutput('{"ok":false,"error":"bad input frame"}')).toEqual({
         ok: false,
-        error: 'invalid isolate payload',
+        error: 'bad input frame',
     });
 });
 

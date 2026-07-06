@@ -135,9 +135,10 @@ ui/build/
 workflows/*
 !workflows/example.ts
 
-# lib is personal — only the README (documenting what goes here) is tracked
+# lib is personal — only the README and the example's container-step module are tracked
 lib/*
 !lib/README.md
+!lib/example-greet.ts
 
 .idea
 local-docs

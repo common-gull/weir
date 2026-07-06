@@ -1,6 +1,5 @@
 // The stdio control envelope every step runtime speaks — the language-agnostic anchor of the
-// container substrate. Generalized from the `{ ok, result | error }` contract the isolate runner
-// writes on stdout (`src/tools/isolate-runner.ts`), split into three frames:
+// container substrate. A step's settled `{ ok, result | error }` contract, split into three frames:
 //
 //   - input  (host → container, one JSON object on stdin)
 //   - output (container → host, one JSON object on stdout: `{ ok, result | error }`)
@@ -45,7 +44,7 @@ export function decodeInput(raw: string): unknown {
 
 // ---- output frame (container → host) ----
 
-/** The settled result of a step, mirroring the isolate runner's stdout contract. */
+/** The settled result of a step: exactly one output frame a runtime shim writes to stdout. */
 export type OutputFrame = { ok: true; result: unknown } | { ok: false; error: string };
 
 export function encodeOutput(frame: OutputFrame): string {

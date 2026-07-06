@@ -14,8 +14,8 @@ beforeEach(() => {
 });
 
 test('pruneHistory removes terminal runs older than the window and keeps recent ones', async () => {
-    defineWorkflow('t', {}, async (ctx) => {
-        await ctx.step('s', () => 1);
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost('s', () => 1);
         return 'ok';
     });
 
@@ -86,7 +86,7 @@ test('openDb backfills the steps.artifacts column on a database created before i
 
         // The write path that previously crashed with "no column named artifacts" now succeeds.
         clearRegistry();
-        defineWorkflow('m', {}, (ctx) => ctx.step('hello', () => 42));
+        defineWorkflow('m', { capabilities: ['host-exec'] }, (ctx) => ctx.runUnsafelyOnHost('hello', () => 42));
         const id = createRun(migrated, 'm');
         expect(await executeRun(migrated, id)).toBe('completed');
         migrated.close();

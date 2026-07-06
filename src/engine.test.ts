@@ -55,21 +55,21 @@ const stepNames = (runId: string) =>
 test('retry-from-failure: completed steps do not re-run; execution resumes at the failure', async () => {
     const ran: string[] = [];
     let failReview = true;
-    defineWorkflow('t', {}, async (ctx) => {
-        await ctx.step('a', () => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost('a', () => {
             ran.push('a');
             return 1;
         });
-        await ctx.step('b', () => {
+        await ctx.runUnsafelyOnHost('b', () => {
             ran.push('b');
             return 2;
         });
-        await ctx.step('c', () => {
+        await ctx.runUnsafelyOnHost('c', () => {
             ran.push('c');
             if (failReview) throw new Error('boom');
             return 3;
         });
-        await ctx.step('d', () => {
+        await ctx.runUnsafelyOnHost('d', () => {
             ran.push('d');
             return 4;
         });
@@ -93,10 +93,10 @@ test('retry-from-failure: completed steps do not re-run; execution resumes at th
 test('ctx.now() is memoized: stable across a retry', async () => {
     const observed: number[] = [];
     let boom = true;
-    defineWorkflow('t', {}, async (ctx) => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
         const n = ctx.now();
         observed.push(n);
-        await ctx.step('x', () => {
+        await ctx.runUnsafelyOnHost('x', () => {
             if (boom) throw new Error('x');
             return 1;
         });
@@ -182,16 +182,16 @@ test('skip: workflow returns ctx.skip -> completed with skipped result', async (
 
 test('retry --from: discards memo at/after a step so it re-runs', async () => {
     const ran: string[] = [];
-    defineWorkflow('t', {}, async (ctx) => {
-        await ctx.step('a', () => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost('a', () => {
             ran.push('a');
             return 1;
         });
-        await ctx.step('b', () => {
+        await ctx.runUnsafelyOnHost('b', () => {
             ran.push('b');
             return 2;
         });
-        await ctx.step('c', () => {
+        await ctx.runUnsafelyOnHost('c', () => {
             ran.push('c');
             return 3;
         });
@@ -210,11 +210,11 @@ test('retry --from: discards memo at/after a step so it re-runs', async () => {
 test('ctx.once() is memoized: a retry replays the same claim result (no seq drift)', async () => {
     const seen: boolean[] = [];
     let boom = true;
-    defineWorkflow('t', {}, async (ctx) => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
         const first = (await ctx.once('slot', '1h')) as boolean;
         seen.push(first);
-        if (first) await ctx.step('gated', () => 1); // a memoized step behind the once() gate
-        await ctx.step('after', () => {
+        if (first) await ctx.runUnsafelyOnHost('gated', () => 1); // a memoized step behind the once() gate
+        await ctx.runUnsafelyOnHost('after', () => {
             if (boom) throw new Error('x');
             return 2;
         });
@@ -229,8 +229,8 @@ test('ctx.once() is memoized: a retry replays the same claim result (no seq drif
 });
 
 test('approveRun resumes the parked gate by name and rejects non-parked runs', async () => {
-    defineWorkflow('t', {}, async (ctx) => {
-        await ctx.step('before', () => 1);
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost('before', () => 1);
         const payload = await ctx.waitForApproval('deploy'); // gate name != default 'human'
         return { approved: payload };
     });
@@ -271,7 +271,7 @@ test('runUnsafelyOnHost: granted -> runs in-process with step-identical memo/rep
             ran.push('a');
             return 1;
         });
-        await ctx.step('b', () => {
+        await ctx.runUnsafelyOnHost('b', () => {
             ran.push('b');
             if (boom) throw new Error('boom');
             return 2;
@@ -289,6 +289,26 @@ test('runUnsafelyOnHost: granted -> runs in-process with step-identical memo/rep
     expect(await executeRun(db, id)).toBe('completed');
     expect(ran).toEqual(['b']); // memoized host step replays, does not re-run
     expect(stepNames(id)).toEqual(['a#0', 'b#0']);
+});
+
+test('ctx.step(fn): a closure is rejected loudly — no in-process fallback, no seq consumed', async () => {
+    let ran = false;
+    defineWorkflow('closurestep', { capabilities: ['host-exec'] }, async (ctx) => {
+        // The closure overload is gone at the type level; a JS caller that still passes a function
+        // hits the runtime guard rather than silently running in-process.
+        const step = ctx.step as unknown as (name: string, fn: () => unknown) => Promise<unknown>;
+        await step('legacy', () => {
+            ran = true;
+            return 1;
+        });
+        return 'ok';
+    });
+    const id = createRun(db, 'closurestep');
+    expect(await executeRun(db, id)).toBe('failed');
+    expect(ran).toBe(false); // the guard throws before the closure could run
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(run.error).toContain('runUnsafelyOnHost'); // points the caller at the host hatch
+    expect(stepNames(id)).toEqual([]); // thrown before any seq/memo is consumed
 });
 
 test('loop it.runUnsafelyOnHost: denied without host-exec, no seq consumed', async () => {
@@ -370,7 +390,7 @@ test('ctx.step spec: a retry replays the memoized exec result without re-running
     let boom = true;
     defineWorkflow('exec', { capabilities: ['host-exec'] }, async (ctx) => {
         const r = await ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 1 } });
-        await ctx.step('after', () => {
+        await ctx.runUnsafelyOnHost('after', () => {
             if (boom) throw new Error('boom');
             return 2;
         });
@@ -423,12 +443,12 @@ test('ctx.step spec: a step declaring gh-pr receives GH_TOKEN (only) in its env'
 
 test('retryRun --from matches step names exactly (no substring over-delete)', async () => {
     const ran: string[] = [];
-    defineWorkflow('t', {}, async (ctx) => {
-        await ctx.step('redeploy-check', () => {
+    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+        await ctx.runUnsafelyOnHost('redeploy-check', () => {
             ran.push('redeploy-check');
             return 1;
         });
-        await ctx.step('deploy', () => {
+        await ctx.runUnsafelyOnHost('deploy', () => {
             ran.push('deploy');
             return 2;
         });
@@ -497,7 +517,7 @@ test('exec artifacts: re-running an identical step replays the stored artifact i
             { runtime: 'node', module: writer, outputs: ['out.txt'] },
             { input: { path: 'out.txt', text: 'once' } },
         );
-        await ctx.step('gate', () => {
+        await ctx.runUnsafelyOnHost('gate', () => {
             if (boom) throw new Error('boom');
             return 1;
         });
