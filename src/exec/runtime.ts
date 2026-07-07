@@ -23,6 +23,21 @@ export interface ArtifactInput {
     path: string;
 }
 
+/** What a host-side extractor (#50) receives: a step's raw process output plus the `path -> hash` map
+ *  of its content-addressed outputs. It runs in the trusted control plane after the step exits and
+ *  PARSES this data — never eval/shells it — turning whatever the process emitted into the step result. */
+export interface ExtractInput {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    artifacts: Record<string, string>;
+}
+
+/** A `(raw) => result` normalizer run on the host once a step's process exits: it returns the step
+ *  result, or throws to fail the step. Defaults to the C1 frame decoder, so a protocol-speaking step
+ *  needs none; an author targeting a stock image supplies one to bridge its native output. */
+export type Extractor = (raw: ExtractInput) => unknown;
+
 export interface LocalStepSpec {
     runtime: Runtime;
     /** Path to the author's step module; a relative path resolves against the daemon cwd so the
@@ -32,6 +47,9 @@ export interface LocalStepSpec {
     inputs?: ArtifactInput[];
     /** Paths, relative to the scratch dir, to snapshot into the store after the step succeeds. */
     outputs?: string[];
+    /** Host-side output normalizer (#50). Omitted, the step's stdout is decoded as a C1 output frame
+     *  (the default). Provide one to adapt a step whose process emits something else natively. */
+    extract?: Extractor;
 }
 
 function shimPath(name: string): string {

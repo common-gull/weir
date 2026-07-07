@@ -70,6 +70,16 @@ export function decodeOutput(raw: string): OutputFrame {
     throw new ProtocolError('output frame must have a boolean "ok" field');
 }
 
+/** Decode a settled process's exit code and captured stdout as an output frame. A non-zero exit with
+ *  empty stdout means the child never wrote a frame at all — distinguished from a malformed one, and
+ *  reported before attempting to decode. */
+export function decodeProcessOutput(exitCode: number, stdout: string): OutputFrame {
+    if (exitCode !== 0 && stdout.trim() === '') {
+        throw new Error(`protocol runner exited ${exitCode} without an output frame`);
+    }
+    return decodeOutput(stdout);
+}
+
 // ---- log convention (container → host, newline-delimited JSON on stderr) ----
 
 export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;

@@ -32,6 +32,7 @@ const nodeStep = fileURLToPath(new URL('./exec/testdata/node-step.ts', import.me
 const nodeEnv = fileURLToPath(new URL('./exec/testdata/node-env.ts', import.meta.url));
 const writer = fileURLToPath(new URL('./exec/testdata/artifact-writer.ts', import.meta.url));
 const reader = fileURLToPath(new URL('./exec/testdata/artifact-reader.ts', import.meta.url));
+const exitWriter = fileURLToPath(new URL('./exec/testdata/exit-writer.ts', import.meta.url));
 
 // Run `fn` with sentinel secrets planted in the daemon env (resolveExecEnv reads process.env), then
 // restore — so an exec step's observed env can be asserted against what the policy actually forwards.
@@ -607,3 +608,79 @@ test('exec artifacts: re-running an identical step replays the stored artifact i
     const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
     expect(JSON.parse(run.result)).toEqual({ result: { wrote: 'out.txt' }, artifacts: { 'out.txt': hash } });
 }, 20_000);
+
+test('ctx.step extract: a custom extractor bridges a non-frame, non-zero-exit process into a result', async () => {
+    const deps = await artifactDeps();
+    defineWorkflow('bridge', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.step(
+            'stock',
+            {
+                runtime: 'node',
+                module: exitWriter,
+                outputs: ['out.json'],
+                // The stock process exits 2 and never returns a protocol result; the host adapts its raw
+                // output (exit code + captured artifact + raw stdout) into the step result rather than
+                // letting the default frame decoder fail it. It PARSES data — no eval, no shell.
+                extract: ({ exitCode, stdout, artifacts }) => ({
+                    exitCode,
+                    sawStdout: stdout.length > 0,
+                    artifact: artifacts['out.json'],
+                }),
+            },
+            { input: { path: 'out.json', text: 'payload', code: 2 } },
+        ),
+    );
+    const id = createRun(db, 'bridge');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    const step = db.query(`SELECT artifacts FROM steps WHERE run_id = ?`).get(id) as { artifacts: string };
+    const hash = (JSON.parse(step.artifacts) as Record<string, string>)['out.json'] ?? '';
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+
+    // Outputs are declared, so the step resolves to { result, artifacts }; `result` is the extractor's
+    // return, proving the engine surfaced the non-zero exit and the content-addressed artifact to it.
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({
+        result: { exitCode: 2, sawStdout: true, artifact: hash },
+        artifacts: { 'out.json': hash },
+    });
+    expect(await readFile(getArtifact(deps.storeDir ?? '', hash), 'utf8')).toBe('payload');
+}, 20_000);
+
+test('ctx.step extract: without an extractor, the default frame decoder still fails that same process', async () => {
+    const deps = await artifactDeps();
+    defineWorkflow('nobridge', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.step(
+            'stock',
+            { runtime: 'node', module: exitWriter, outputs: ['out.json'] },
+            {
+                input: { path: 'out.json', text: 'payload', code: 2 },
+            },
+        ),
+    );
+    const id = createRun(db, 'nobridge');
+    // Byte-identical to today: the shim's failure frame fails the step under the default decoder.
+    expect(await executeRun(db, id, deps)).toBe('failed');
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(JSON.parse(run.error).message).toContain('exited the process before returning a result');
+}, 20_000);
+
+test('ctx.step extract: an extractor that throws fails the step with its own error', async () => {
+    defineWorkflow('reject', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.step(
+            'run',
+            {
+                runtime: 'node',
+                module: nodeStep,
+                extract: ({ stdout }) => {
+                    throw new Error(`extractor rejected ${stdout.length} bytes`);
+                },
+            },
+            { input: { n: 1 } },
+        ),
+    );
+    const id = createRun(db, 'reject');
+    expect(await executeRun(db, id)).toBe('failed');
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(JSON.parse(run.error).message).toContain('extractor rejected');
+}, 15_000);
