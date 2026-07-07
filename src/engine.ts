@@ -487,7 +487,11 @@ function buildCtx(
                     exitCode: raw.exitCode,
                     stdout: raw.stdout,
                     stderr: raw.stderr,
-                    artifacts: plan.map,
+                    // A shallow copy, not `plan.map` itself: the extractor gets a mutable `Record` it may
+                    // scribble on, but the persisted `artifacts` below must stay exactly the `path -> hash`
+                    // map that `commit()` content-addresses — else a mutating extractor could diverge a
+                    // step's recorded artifacts from what was actually stored.
+                    artifacts: { ...plan.map },
                 });
                 if (snapshotErr) throw snapshotErr;
                 await plan.commit();

@@ -647,6 +647,38 @@ test('ctx.step extract: a custom extractor bridges a non-frame, non-zero-exit pr
     expect(await readFile(getArtifact(deps.storeDir ?? '', hash), 'utf8')).toBe('payload');
 }, 20_000);
 
+test('ctx.step extract: mutating the extractor artifacts map does not corrupt the persisted record', async () => {
+    const deps = await artifactDeps();
+    defineWorkflow('mutate', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.step(
+            'stock',
+            {
+                runtime: 'node',
+                module: exitWriter,
+                outputs: ['out.json'],
+                // A misbehaving extractor scribbles on its `artifacts` input — overwrites the real hash and
+                // adds a bogus key. The persisted record must stay the content-addressed map the engine
+                // committed, not whatever the extractor left behind.
+                extract: ({ artifacts }) => {
+                    artifacts['out.json'] = 'not-a-hash';
+                    artifacts.injected = 'bogus';
+                    return { ok: true };
+                },
+            },
+            { input: { path: 'out.json', text: 'payload', code: 2 } },
+        ),
+    );
+    const id = createRun(db, 'mutate');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    const step = db.query(`SELECT artifacts FROM steps WHERE run_id = ?`).get(id) as { artifacts: string };
+    const persisted = JSON.parse(step.artifacts) as Record<string, string>;
+    // The extractor's mutations are absent: the real content-addressed hash survives, the injected key does not.
+    expect(persisted.injected).toBeUndefined();
+    expect(persisted['out.json']).toMatch(/^[0-9a-f]{64}$/);
+    expect(await readFile(getArtifact(deps.storeDir ?? '', persisted['out.json'] ?? ''), 'utf8')).toBe('payload');
+}, 20_000);
+
 test('ctx.step extract: without an extractor, the default frame decoder still fails that same process', async () => {
     const deps = await artifactDeps();
     defineWorkflow('nobridge', { capabilities: ['host-exec'] }, async (ctx) =>
