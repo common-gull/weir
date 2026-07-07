@@ -11,11 +11,17 @@ import type { DB } from './db.ts';
 
 const HASH_RE = /^[0-9a-f]{64}$/;
 
+/** The content address (sha256 hex) of raw bytes — the key putArtifact stores them under. Exposed so
+ *  a caller can content-address bytes without committing them to the store yet. */
+export function artifactHash(bytes: Uint8Array): string {
+    return createHash('sha256').update(bytes).digest('hex');
+}
+
 /** Store `src` (a file path or raw bytes) under `storeDir` and return its sha256 hex hash.
  *  Identical content reuses the same key, so a repeat put is a no-op on disk (dedup). */
 export async function putArtifact(db: DB, storeDir: string, src: string | Uint8Array): Promise<string> {
     const bytes = typeof src === 'string' ? await readFile(src) : src;
-    const hash = createHash('sha256').update(bytes).digest('hex');
+    const hash = artifactHash(bytes);
     const dest = join(storeDir, hash);
     await mkdir(storeDir, { recursive: true });
     if (!existsSync(dest)) {

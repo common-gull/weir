@@ -17,7 +17,7 @@ import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
 import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
-import { buildArgv, type ExtractInput, snapshotOutputs, stageInputs } from './exec/runtime.ts';
+import { buildArgv, type ExtractInput, planOutputs, snapshotOutputs, stageInputs } from './exec/runtime.ts';
 import { runProcess } from './exec/spawn.ts';
 import {
     SkipSignal,
@@ -465,26 +465,33 @@ function buildCtx(
             const snapshot = (): Promise<StepArtifacts> =>
                 scratch && outputs.length > 0 ? snapshotOutputs(db, storeDir, scratch, outputs) : Promise.resolve({});
             // A custom extractor can derive its result — or its own failure — from the declared outputs
-            // even on a non-zero exit, so content-address them up front and hand it the `path -> hash`
-            // map. A snapshot failure (a declared output the step never wrote) is deferred past the
-            // extractor: an extractor that raises its own failure from the raw output wins, and the
-            // missing-output error surfaces only if the extractor otherwise treated the run as a success.
+            // even on a non-zero exit, so content-address them up front (hashing only) and hand it the
+            // `path -> hash` map. The store commit is DEFERRED until the extractor accepts the run: an
+            // extractor that throws fails the step without orphaning artifacts, matching the default
+            // path's guarantee for a failed step. A snapshot failure (a declared output the step never
+            // wrote) is likewise deferred past the extractor: an extractor that raises its own failure
+            // from the raw output wins, and the missing-output error surfaces only if the extractor
+            // otherwise treated the run as a success.
             if (spec.extract) {
-                let artifacts: StepArtifacts = {};
+                let plan: { map: StepArtifacts; commit: () => Promise<void> } = {
+                    map: {},
+                    commit: () => Promise.resolve(),
+                };
                 let snapshotErr: unknown;
                 try {
-                    artifacts = await snapshot();
+                    if (scratch && outputs.length > 0) plan = await planOutputs(db, storeDir, scratch, outputs);
                 } catch (e) {
                     snapshotErr = e;
                 }
-                const result = spec.extract({
+                const result = await spec.extract({
                     exitCode: raw.exitCode,
                     stdout: raw.stdout,
                     stderr: raw.stderr,
-                    artifacts,
+                    artifacts: plan.map,
                 });
                 if (snapshotErr) throw snapshotErr;
-                return { result, artifacts };
+                await plan.commit();
+                return { result, artifacts: plan.map };
             }
             // Default path: the frame decoder rejects a failed run before we touch the store, so — as in
             // the pre-extract engine — a step that fails the protocol never has its declared outputs

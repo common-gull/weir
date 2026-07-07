@@ -688,3 +688,52 @@ test('ctx.step extract: an extractor that throws fails the step with its own err
     const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
     expect(JSON.parse(run.error).message).toContain('extractor rejected');
 }, 15_000);
+
+test('ctx.step extract: an extractor that throws leaves no orphan artifacts from its declared outputs', async () => {
+    const deps = await artifactDeps();
+    defineWorkflow('reject-artifacts', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.step(
+            'run',
+            {
+                runtime: 'node',
+                module: writer,
+                outputs: ['out.txt'],
+                extract: () => {
+                    throw new Error('extractor rejected the run');
+                },
+            },
+            { input: { path: 'out.txt', text: 'wrote-but-rejected' } },
+        ),
+    );
+    const id = createRun(db, 'reject-artifacts');
+    expect(await executeRun(db, id, deps)).toBe('failed');
+    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
+    expect(JSON.parse(run.error).message).toContain('extractor rejected');
+    // The declared output was written and content-addressed for the extractor, but the store commit is
+    // deferred until the extractor accepts the run — so a rejecting extractor orphans nothing, matching
+    // the default decoder's guarantee ('without an extractor', above).
+    const count = db.query(`SELECT COUNT(*) AS n FROM artifacts`).get() as { n: number };
+    expect(count.n).toBe(0);
+}, 20_000);
+
+test('ctx.step extract: an async extractor is awaited, so its resolved value is the step result', async () => {
+    defineWorkflow('async-extract', { capabilities: ['host-exec'] }, async (ctx) =>
+        ctx.step(
+            'run',
+            {
+                runtime: 'node',
+                module: nodeStep,
+                extract: async ({ exitCode }) => {
+                    await Promise.resolve();
+                    return { ok: exitCode === 0, via: 'async' };
+                },
+            },
+            { input: { n: 1 } },
+        ),
+    );
+    const id = createRun(db, 'async-extract');
+    expect(await executeRun(db, id)).toBe('completed');
+    // Without the await the stored result would be a serialized pending Promise ({}), not this object.
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual({ ok: true, via: 'async' });
+}, 15_000);
