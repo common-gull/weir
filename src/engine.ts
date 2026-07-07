@@ -462,28 +462,40 @@ function buildCtx(
                 timeoutMs: opts.timeout,
                 onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
             });
-            // Content-address the declared outputs first so the extractor sees their `path -> hash` map,
-            // then normalize the raw output into the step result. A snapshot failure (a declared output
-            // the step never wrote) is deferred past the extractor: a custom extractor that raises its
-            // own failure from the raw output wins, and the missing-output error surfaces only if the
-            // extractor otherwise treated the run as a success — preserving today's decode-before-snapshot
-            // order (and its error) for the default path.
-            let artifacts: StepArtifacts = {};
-            let snapshotErr: unknown;
-            if (scratch && outputs.length > 0) {
+            const snapshot = (): Promise<StepArtifacts> =>
+                scratch && outputs.length > 0 ? snapshotOutputs(db, storeDir, scratch, outputs) : Promise.resolve({});
+            // A custom extractor can derive its result — or its own failure — from the declared outputs
+            // even on a non-zero exit, so content-address them up front and hand it the `path -> hash`
+            // map. A snapshot failure (a declared output the step never wrote) is deferred past the
+            // extractor: an extractor that raises its own failure from the raw output wins, and the
+            // missing-output error surfaces only if the extractor otherwise treated the run as a success.
+            if (spec.extract) {
+                let artifacts: StepArtifacts = {};
+                let snapshotErr: unknown;
                 try {
-                    artifacts = await snapshotOutputs(db, storeDir, scratch, outputs);
+                    artifacts = await snapshot();
                 } catch (e) {
                     snapshotErr = e;
                 }
+                const result = spec.extract({
+                    exitCode: raw.exitCode,
+                    stdout: raw.stdout,
+                    stderr: raw.stderr,
+                    artifacts,
+                });
+                if (snapshotErr) throw snapshotErr;
+                return { result, artifacts };
             }
-            const result = (spec.extract ?? decodeFrameResult)({
+            // Default path: the frame decoder rejects a failed run before we touch the store, so — as in
+            // the pre-extract engine — a step that fails the protocol never has its declared outputs
+            // content-addressed. Only a decode success reaches the snapshot.
+            const result = decodeFrameResult({
                 exitCode: raw.exitCode,
                 stdout: raw.stdout,
                 stderr: raw.stderr,
-                artifacts,
+                artifacts: {},
             });
-            if (snapshotErr) throw snapshotErr;
+            const artifacts = await snapshot();
             return { result, artifacts };
         } finally {
             if (scratch) await rm(scratch, { recursive: true, force: true });

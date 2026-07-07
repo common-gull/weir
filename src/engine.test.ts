@@ -663,6 +663,10 @@ test('ctx.step extract: without an extractor, the default frame decoder still fa
     expect(await executeRun(db, id, deps)).toBe('failed');
     const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
     expect(JSON.parse(run.error).message).toContain('exited the process before returning a result');
+    // The default decoder rejects the failed run before the store is touched, so the output the shim
+    // wrote (out.json) is never content-addressed — no orphan artifact rows from a failed step.
+    const count = db.query(`SELECT COUNT(*) AS n FROM artifacts`).get() as { n: number };
+    expect(count.n).toBe(0);
 }, 20_000);
 
 test('ctx.step extract: an extractor that throws fails the step with its own error', async () => {
