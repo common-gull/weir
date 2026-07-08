@@ -1,10 +1,11 @@
-// Runtime-agnostic subprocess runner that speaks the C1 stdio protocol (src/exec/protocol.ts) to an
-// injected argv. The caller supplies the command line — a local bun shim in tests, a `docker run …`
-// invocation later (C8) — and this module owns the mechanics: marshal the input frame to stdin,
-// stream stderr log lines to `onLog`, collect the single output frame from stdout, and keep the
-// daemon alive by SIGKILLing a runaway child on a hard timeout, an output-size cap, or an optional
-// RSS cap. It knows nothing about runtimes or containers; argv construction (C3) and Docker wiring
-// (C8) live elsewhere.
+// Runtime-agnostic subprocess runner for the container substrate. The caller supplies the command
+// line — a local bun shim in tests, a `docker run …` invocation later (C8) — and this module owns the
+// mechanics: marshal the C1 input frame to stdin, stream stderr log lines to `onLog`, collect the
+// child's raw stdout, and keep the daemon alive by SIGKILLing a runaway child on a hard timeout, an
+// output-size cap, or an optional RSS cap. `runProcess` hands back the raw `{ exitCode, stdout, stderr }`
+// for a host-side extractor to interpret (#50); `runProtocol` is the thin wrapper that decodes that
+// stdout as a C1 output frame — the default. It knows nothing about runtimes or containers; argv
+// construction (C3) and Docker wiring (C8) live elsewhere.
 //
 // Both of the child's pipes are bounded, not just its RSS: stderr streams line-by-line — a
 // newline-less line is flushed once it crosses `maxStderrLineBytes`, so the parent's line buffer
@@ -16,7 +17,7 @@
 // kernel-enforced — that trades a hard guarantee for uniform behavior across OSes, the right call for
 // buggy, not hostile, code. A real kernel-enforced limit is Docker's job (C8).
 
-import { decodeOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
+import { decodeProcessOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
 import { readRssBytes } from './rss.ts';
 
 const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -153,10 +154,19 @@ function abortError(signal: AbortSignal): Error {
     return signal.reason instanceof Error ? signal.reason : new Error('protocol runner aborted');
 }
 
-/** Spawn `argv`, exchange one input frame for one output frame over the C1 protocol, and return the
- *  decoded output envelope. Rejects instead when the child never speaks the protocol: SIGKILLed on
- *  the timeout or RSS cap, aborted via `signal`, or exited without a frame. */
-export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
+/** The raw settled output of a spawned step: its exit code and captured stdout/stderr. A host-side
+ *  extractor (engine, #50) normalizes this into the step result; frame decoding is just the default. */
+export interface ProcessResult {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+}
+
+/** Spawn `argv`, marshal the C1 input frame to stdin, and return the child's raw `{ exitCode, stdout,
+ *  stderr }` — leaving interpretation to the caller's extractor. Rejects only when the child is
+ *  forcibly stopped: SIGKILLed on the timeout, RSS cap, or output-size cap, or aborted via `signal`. A
+ *  plain non-zero exit is NOT an error here — it's a raw material the extractor decides on. */
+export async function runProcess(opts: RunProtocolOpts): Promise<ProcessResult> {
     const { argv, input, signal, memoryMb, onLog } = opts;
     const timeoutMs = opts.timeoutMs ?? 30_000;
     const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
@@ -200,7 +210,12 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
     // guard the pump on both fronts. A throwing log sink is caught per line so it neither aborts
     // draining nor rejects the promise; the trailing .catch keeps a stray stream-read error from
     // becoming an unhandled rejection (which would crash the daemon) during that unawaited window.
+    // Accumulate a bounded stderr transcript for the end-of-run extractor while still streaming each
+    // line live to `onLog`. The live log channel is unchanged; this is a separate transcript the
+    // extractor may inspect (e.g. a stock image that reports results on stderr), never the log path.
+    let stderr = '';
     const stderrDone = pumpLines(proc.stderr, maxStderrLineBytes, (line) => {
+        if (stderr.length < maxOutputBytes) stderr += stderr ? `\n${line}` : line;
         if (!onLog) return;
         try {
             forwardLog(line, onLog);
@@ -229,10 +244,7 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
             throw new Error(`protocol runner produced more than ${maxOutputBytes} bytes of output (killed)`);
         }
         if (killCause === 'abort' && signal) throw abortError(signal);
-        if (exit !== 0 && stdout.trim() === '') {
-            throw new Error(`protocol runner exited ${exit} without an output frame`);
-        }
-        return decodeOutput(stdout);
+        return { exitCode: exit, stdout, stderr };
     } finally {
         // Guarantee no orphan survives an untracked stream error (e.g. reader.read() throwing for a
         // reason none of the `killed` causes cover); a no-op once the child has already exited.
@@ -241,4 +253,12 @@ export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
         if (poll) clearInterval(poll);
         signal?.removeEventListener('abort', onAbort);
     }
+}
+
+/** The frame-protocol view of {@link runProcess}: decode the child's stdout as one C1 output frame and
+ *  return the settled `{ ok, result | error }` envelope. Rejects when the child never spoke the
+ *  protocol at all — SIGKILLed on a limit, aborted, or exited non-zero without writing a frame. */
+export async function runProtocol(opts: RunProtocolOpts): Promise<OutputFrame> {
+    const { exitCode, stdout } = await runProcess(opts);
+    return decodeProcessOutput(exitCode, stdout);
 }

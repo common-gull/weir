@@ -2,6 +2,8 @@
 
 import type { LocalStepSpec } from './exec/runtime.ts';
 
+export type { ExtractInput, Extractor } from './exec/runtime.ts';
+
 export type RunStatus =
     | 'queued'
     | 'running'
@@ -52,7 +54,9 @@ export interface StepOpts<T = unknown> {
 
 /** The container-step body `ctx.step` runs: a module the exec runtime executes in a subprocess
  *  speaking the stdio protocol. `ctx.step(name, spec, { input })` builds the runtime's argv, runs the
- *  module, and memoizes its JSON result like any step (the in-process `runUnsafelyOnHost` included). */
+ *  module, and memoizes its JSON result like any step (the in-process `runUnsafelyOnHost` included).
+ *  An optional `extract` (#50) normalizes the step's raw output on the host; it defaults to the C1
+ *  frame decoder, so a protocol-speaking step is unaffected. */
 export type StepSpec = LocalStepSpec;
 
 /** A spec that declares `outputs`: after the run, the engine snapshots each declared path from the

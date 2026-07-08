@@ -63,3 +63,43 @@ closure, so it's gated on `host-exec` too — without that gate it would be a wa
 around the capability.
 
 See `workflows/example.ts` for a tracked, tested demonstration.
+
+## Host-side output extractors
+
+By default a `ctx.step` module speaks the C1 stdio protocol: it writes one `{ ok, result }` frame to
+stdout and weir decodes it. That forces every image to carry a protocol shim. An optional `extract`
+on the step spec lifts that requirement — a control-plane `(raw) => result` function weir runs on the
+host after the step's process exits:
+
+```ts
+type ExtractInput = { exitCode: number; stdout: string; stderr: string; artifacts: Record<string, string> };
+type Extractor = (raw: ExtractInput) => unknown; // returns the step result; throws to fail the step
+
+ctx.step('encode', {
+    runtime: 'node',
+    module: './workflows/steps/encode.ts',
+    outputs: ['out/result.json'],
+    extract: ({ exitCode, stderr, artifacts }) => {
+        if (exitCode !== 0) throw new Error(stderr);
+        return { output: artifacts['out/result.json'] }; // the content hash the output was addressed to
+    },
+});
+```
+
+`extract` **defaults to the frame decoder**, so a protocol-speaking step never sees it and existing
+steps are unchanged — the knob is opt-in, only touched when pointing at a non-conforming image.
+`decodeFrameResult` (the default) fails the step on a non-zero exit with no frame, a malformed frame,
+or an `{ ok:false }` frame, exactly as before.
+
+Two properties make this safe and dependable:
+
+- **It parses, never evaluates.** The extractor receives the process's captured output as *data* —
+  never a shell or `eval` into the sandbox. Adaptation runs in the trusted host plane; the container
+  stays untrusted, and interpreting its output is the trusted side's job. It's also the natural home
+  for boundary schema validation — assert the result matches the declared output shape, once, on
+  return.
+- **Prefer file/artifact output over stdout-scraping.** An extractor keyed on a declared `outputs`
+  file (`out/result.json`, content-addressed and handed back in `raw.artifacts`) is far more robust
+  than parsing free-form stdout, which mixes with a stock tool's own chatter. The live **logs**
+  channel (streamed stderr during the run) is unchanged — `extract` is end-of-run result
+  normalization only, never the log path.

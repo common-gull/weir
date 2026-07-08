@@ -16,8 +16,9 @@ import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
 import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
-import { buildArgv, snapshotOutputs, stageInputs } from './exec/runtime.ts';
-import { runProtocol } from './exec/spawn.ts';
+import { decodeProcessOutput } from './exec/protocol.ts';
+import { buildArgv, type ExtractInput, planOutputs, snapshotOutputs, stageInputs } from './exec/runtime.ts';
+import { runProcess } from './exec/spawn.ts';
 import {
     SkipSignal,
     type Capability,
@@ -113,6 +114,16 @@ function closureStepError(surface: string, name: string, hostHatch: string): Err
             `{ runtime, module } to run it in the exec runtime, or use ${hostHatch} ` +
             `(gated on 'host-exec') for host-touching work.`,
     );
+}
+
+/** The default host-side extractor (#50): interpret a step's raw process output as a C1 output frame —
+ *  the exact behavior every exec step had before `extract` became pluggable. A non-zero exit with no
+ *  frame, a malformed frame, or an `{ ok:false }` frame each fail the step; an `{ ok:true }` frame
+ *  yields its result. An author targeting a non-conforming image overrides it with `spec.extract`. */
+function decodeFrameResult(raw: ExtractInput): unknown {
+    const frame = decodeProcessOutput(raw.exitCode, raw.stdout);
+    if (!frame.ok) throw new Error(frame.error);
+    return frame.result;
 }
 
 export interface RunDeps {
@@ -421,8 +432,10 @@ function buildCtx(
     // (C3) rather than in-process on the host. Streamed log lines surface as step.log events like the
     // in-process host step's log channel. When the spec declares inputs/outputs the step runs in an isolated
     // scratch dir (#C6): declared input artifacts are staged in from the store beforehand and declared
-    // outputs snapshotted back into it afterward, their `path -> hash` map returned alongside the
-    // module's JSON result. The scratch dir is torn down once outputs are safely content-addressed.
+    // outputs snapshotted back into it afterward, their `path -> hash` map returned alongside the result.
+    // The step's raw output is normalized by the host-side extractor (#50) — `spec.extract`, defaulting
+    // to the frame decoder — which returns the result or throws to fail the step. The scratch dir is
+    // torn down once outputs are safely content-addressed.
     async function runExecStep(
         seq: number,
         spec: StepSpec,
@@ -438,7 +451,7 @@ function buildCtx(
                 await mkdir(scratch, { recursive: true });
                 await stageInputs(storeDir, scratch, inputs);
             }
-            const out = await runProtocol({
+            const raw = await runProcess({
                 argv: buildArgv(spec),
                 cwd: scratch,
                 input: opts.input,
@@ -449,10 +462,52 @@ function buildCtx(
                 timeoutMs: opts.timeout,
                 onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
             });
-            if (!out.ok) throw new Error(out.error);
-            const artifacts =
-                scratch && outputs.length > 0 ? await snapshotOutputs(db, storeDir, scratch, outputs) : {};
-            return { result: out.result, artifacts };
+            const snapshot = (): Promise<StepArtifacts> =>
+                scratch && outputs.length > 0 ? snapshotOutputs(db, storeDir, scratch, outputs) : Promise.resolve({});
+            // A custom extractor can derive its result — or its own failure — from the declared outputs
+            // even on a non-zero exit, so content-address them up front (hashing only) and hand it the
+            // `path -> hash` map. The store commit is DEFERRED until the extractor accepts the run: an
+            // extractor that throws fails the step without orphaning artifacts, matching the default
+            // path's guarantee for a failed step. A snapshot failure (a declared output the step never
+            // wrote) is likewise deferred past the extractor: an extractor that raises its own failure
+            // from the raw output wins, and the missing-output error surfaces only if the extractor
+            // otherwise treated the run as a success.
+            if (spec.extract) {
+                let plan: { map: StepArtifacts; commit: () => Promise<void> } = {
+                    map: {},
+                    commit: () => Promise.resolve(),
+                };
+                let snapshotErr: unknown;
+                try {
+                    if (scratch && outputs.length > 0) plan = await planOutputs(db, storeDir, scratch, outputs);
+                } catch (e) {
+                    snapshotErr = e;
+                }
+                const result = await spec.extract({
+                    exitCode: raw.exitCode,
+                    stdout: raw.stdout,
+                    stderr: raw.stderr,
+                    // A shallow copy, not `plan.map` itself: the extractor gets a mutable `Record` it may
+                    // scribble on, but the persisted `artifacts` below must stay exactly the `path -> hash`
+                    // map that `commit()` content-addresses — else a mutating extractor could diverge a
+                    // step's recorded artifacts from what was actually stored.
+                    artifacts: { ...plan.map },
+                });
+                if (snapshotErr) throw snapshotErr;
+                await plan.commit();
+                return { result, artifacts: plan.map };
+            }
+            // Default path: the frame decoder rejects a failed run before we touch the store, so — as in
+            // the pre-extract engine — a step that fails the protocol never has its declared outputs
+            // content-addressed. Only a decode success reaches the snapshot.
+            const result = decodeFrameResult({
+                exitCode: raw.exitCode,
+                stdout: raw.stdout,
+                stderr: raw.stderr,
+                artifacts: {},
+            });
+            const artifacts = await snapshot();
+            return { result, artifacts };
         } finally {
             if (scratch) await rm(scratch, { recursive: true, force: true });
         }

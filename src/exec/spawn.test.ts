@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { fileURLToPath } from 'node:url';
 import type { LogFrame } from './protocol.ts';
-import { runProtocol } from './spawn.ts';
+import { runProcess, runProtocol } from './spawn.ts';
 
 const SHIM = fileURLToPath(new URL('./testdata/echo-shim.ts', import.meta.url));
 const argv = ['bun', SHIM];
@@ -90,6 +90,21 @@ test('a throwing onLog sink is swallowed rather than crashing the run', async ()
 test('a failed output frame is returned, not thrown', async () => {
     const out = await runProtocol({ argv, input: { mode: 'fail', message: 'boom' }, timeoutMs: 10_000 });
     expect(out).toEqual({ ok: false, error: 'boom' });
+});
+
+test('runProcess surfaces a plain subprocess raw: stdout, stderr, and a non-zero exit, no frame decode', async () => {
+    // A process that speaks no protocol — non-frame stdout, a stderr line, a non-zero exit. runProcess
+    // hands the raw materials back for a host-side extractor rather than throwing or decoding a frame.
+    const script =
+        'await Bun.write(Bun.stderr, "diag\\n"); await Bun.write(Bun.stdout, "not-a-frame"); process.exit(2);';
+    const out = await runProcess({ argv: ['bun', '-e', script], input: null, timeoutMs: 10_000 });
+    expect(out).toEqual({ exitCode: 2, stdout: 'not-a-frame', stderr: 'diag' });
+});
+
+test('runProcess still rejects when a forced-stop limit fires (the extractor never runs)', async () => {
+    // The kill guards are runProcess's job, not the extractor's — a runaway child is stopped and the
+    // promise rejects before any raw output could be handed to an extractor.
+    await expect(runProcess({ argv, input: { mode: 'hang' }, timeoutMs: 400 })).rejects.toThrow(/timed out/);
 });
 
 test('a runaway child is SIGKILLed on the timeout and the daemon survives', async () => {
