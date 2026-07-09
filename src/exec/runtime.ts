@@ -174,10 +174,13 @@ export function dockerCapabilityMounts(): DockerMount[] {
 // into the store afterward. A declared path that is a directory rides through the store as one tar
 // blob (archived on the way out, unpacked on the way in), so a repo checkout or dependency tree is a
 // single content-addressed artifact. Every declared path is confined to the scratch dir so a module
-// can't read or clobber files outside it via `..` or an absolute path. Symlinks are that boundary's
-// third vector: a directory artifact must be symlink-free, else `tar` would store a link and recreate
-// it live in a *different* scratch dir on stage-in, where a later read/write would follow it out. So a
-// symlink is refused on archive (assertNoSymlinks / the lstat below) and again on unpack (stageInputs).
+// can't read or clobber files outside it via `..` or an absolute path. A directory artifact adds two
+// more vectors, both riding *inside* its tar: a symlink member (stored as a link, recreated live in a
+// *different* scratch dir on stage-in, where a later read/write follows it out) and a traversing
+// member name (a `..` component or an absolute path that `tar -x` could write outside the destination —
+// system `tar` doesn't portably sanitize these). A symlink is refused on archive (assertNoSymlinks /
+// the lstat below); both are refused again on unpack from the tar's own member list, before any member
+// touches the host fs (assertBlobStagesWithin).
 
 /** Resolve `rel` under `base`, refusing a path that escapes the scratch dir. This is the filesystem
  *  boundary for staging — the analogue of the `$`-template injection boundary for shelling out. */
@@ -225,15 +228,25 @@ async function archiveDir(dir: string, archive: string): Promise<void> {
     await $`tar ${exclude} --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf ${archive} -C ${dir} .`.quiet();
 }
 
-/** Scan a tar blob's member list and refuse it if any entry is a symlink, *before* it is extracted —
- *  so an escaping link is caught without ever being materialized on the host fs (a link extracted
- *  first and pruned after could already have been written through by a following member). `-tv`'s
- *  verbose listing tags a symlink member with a leading `l`, exactly as `ls -l` does. Defense in depth:
- *  archiveDir already refuses to store such a blob, so this only bites one that reached the store some
- *  other way. */
-async function assertBlobHasNoSymlinks(blob: string): Promise<void> {
-    const listing = await $`tar -tvf ${blob}`.text();
-    if (listing.split('\n').some((line) => line.startsWith('l'))) throw symlinkError(blob);
+/** Scan a tar blob's member list and refuse it if any member could escape the destination on unpack,
+ *  *before* anything is extracted — so an escaping member is caught without ever being materialized on
+ *  the host fs (a member extracted first and pruned after could already have been read or written
+ *  through). Two vectors: a symlink member (`-tv`'s verbose listing tags one with a leading `l`,
+ *  exactly as `ls -l` does; `tar -x` would recreate the link live, then a later read/write follows it
+ *  out) and a traversing member name — a `..` component or an absolute path that `tar -x` could write
+ *  outside the `-C` destination. `resolveWithin` confines only the *destination* dir, not the tar's own
+ *  member paths, and system `tar` doesn't portably strip `..`/leading-`/` on extraction, so names are
+ *  validated here rather than trusting the extractor. Defense in depth: archiveDir produces neither, so
+ *  this only bites a blob that reached the store some other way. */
+async function assertBlobStagesWithin(blob: string): Promise<void> {
+    if ((await $`tar -tvf ${blob}`.text()).split('\n').some((line) => line.startsWith('l'))) {
+        throw symlinkError(blob);
+    }
+    for (const name of (await $`tar -tf ${blob}`.text()).split('\n')) {
+        if (name.length > 0 && (isAbsolute(name) || name.split('/').includes('..'))) {
+            throw new Error(`directory artifact member escapes the scratch dir: ${name}`);
+        }
+    }
 }
 
 /** Copy each declared input artifact from the store into the scratch dir before the step runs. A
@@ -243,7 +256,7 @@ export async function stageInputs(db: DB, storeDir: string, scratch: string, inp
         const dest = resolveWithin(scratch, path);
         const blob = getArtifact(storeDir, hash);
         if (artifactKind(db, hash) === 'dir') {
-            await assertBlobHasNoSymlinks(blob);
+            await assertBlobStagesWithin(blob);
             await mkdir(dest, { recursive: true });
             await $`tar -xf ${blob} -C ${dest}`.quiet();
         } else {

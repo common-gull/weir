@@ -298,3 +298,20 @@ test('staging refuses a directory blob carrying a symlink, closing the escape on
         });
     });
 });
+
+test('staging refuses a directory blob whose member escapes via a traversing path', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        // A 'dir' blob the guarded archive path would never produce: a hand-built tar whose member name
+        // climbs out of the destination with `..`. `-P` on create keeps the `..` in the stored name;
+        // system tar doesn't portably strip it on extract, so the guard must reject it from the listing.
+        await mkdir(join(a, 'payload'), { recursive: true });
+        await writeFile(join(a, 'payload/loot.txt'), 'pwned');
+        const tar = join(a, 'slip.tar');
+        await $`tar -P -cf ${tar} -C ${join(a, 'payload')} ${'../payload/loot.txt'}`.quiet();
+        const hash = await putArtifact(db, store, tar, 'dir');
+
+        await expect(stageInputs(db, store, b, [{ hash, path: 'tree' }])).rejects.toThrow(/escapes the scratch dir/);
+        // Nothing was extracted, so no member climbed out of the destination onto the host.
+        expect(existsSync(join(b, 'tree'))).toBe(false);
+    });
+});
