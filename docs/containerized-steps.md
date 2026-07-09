@@ -50,17 +50,24 @@ sharing one spawn seam (`src/exec/spawn.ts`) and the same protocol:
   plain subprocess running as the daemon's user; it is **not yet sandboxed from the host**, so its only
   isolation lever is the capability-scoped env below. It exists as the ergonomic, always-available form
   (node runs on `bun`, so CI needs no Docker).
-- **Rung 2 — docker.** The same spawn seam, but the child is a `docker run`. This is the rung that
-  actually sandboxes: a locked-down network, a single bind-mounted scratch dir, and a digest-pinned
-  image (below). A step is authored either as an explicit `image` + `cmd` (the image speaks the protocol
-  itself) or, ergonomically, as the same `{ runtime, module }` as rung 1 — which maps to weir's pinned
-  base image (`weir-node` / `weir-python`), bind-mounts the module read-only at `/opt/weir`, and runs
-  the baked shim on it. Either way the author ships just a module and needs no protocol-aware image.
+- **Rung 2 — docker** *(design; not yet wired into dispatch — the argv builder, digest pinning, and
+  capability mounts are built and unit-tested, but nothing routes a step to them yet; see below)*. The
+  same spawn seam, but the child is a `docker run`. This is the rung that actually sandboxes: a
+  locked-down network, a single bind-mounted scratch dir, and a digest-pinned image (below). A step is
+  authored either as an explicit `image` + `cmd` (the image speaks the protocol itself) or,
+  ergonomically, as the same `{ runtime, module }` as rung 1 — which maps to weir's pinned base image
+  (`weir-node` / `weir-python`), bind-mounts the module read-only at `/opt/weir`, and runs the baked
+  shim on it. Either way the author ships just a module and needs no protocol-aware image.
 
-The dedicated surface for this opt-in path is `ctx.containerStep`. Until it lands, the exec runtime is
-reached through a transitional `StepSpec` overload on `ctx.step` — `ctx.step(name, spec)`, dispatched by
-`typeof` (a function is a host closure, an object is a spec). Inside `ctx.loop`, `it.step` takes the
-same two forms with the loop's per-iteration keying.
+The dedicated surface for the container rung is `ctx.containerStep`, and **it hasn't landed — so rung 2
+is not reachable from a workflow yet.** What ships today is a transitional `StepSpec` overload on
+`ctx.step` that routes only to **rung 1**: `ctx.step(name, spec)`, dispatched by `typeof` (a function is
+a host closure, an object is a spec). That `StepSpec` is the local `{ runtime, module }` form only — it
+carries no `image`, `cmd`, or `network` field — so a docker spec handed to `ctx.step` is a type error,
+not a container step. The rung-2 machinery above (`src/exec/runtime.ts`, `src/exec/docker.ts`) is built
+and unit-tested against the design this section describes, but nothing dispatches to it until
+`ctx.containerStep` wires it in. Inside `ctx.loop`, `it.step` takes the same two forms with the loop's
+per-iteration keying.
 
 The container rung is built on four properties, each a lever a workflow can reason about.
 
@@ -91,9 +98,12 @@ login; read-only, so a compromised image can't rewrite credentials or plant a se
 ### Gated network
 
 A docker step gets `--network none` — no egress — by default. A `network: true` spec trades that for
-docker's default bridge, and opting in requires the `network` capability, enforced in dispatch. The argv
-builder itself takes the flag verbatim and stays a pure, Docker-free-testable function of its inputs;
-the capability gate lives one layer up.
+docker's default bridge. The argv builder itself takes the flag verbatim and stays a pure,
+Docker-free-testable function of its inputs; the capability gate for opting in lives one layer up, in
+dispatch. That gate is **not yet wired** — no code checks the `network` capability today
+(`requireCapability` is called only for `git-push`, `gh-pr`, and `gh-comment`), because the docker
+dispatch it would live in doesn't exist yet — so declaring or omitting `network` is not an egress
+control until the container rung is dispatched (`ctx.containerStep`).
 
 ### Scratch staging and content-addressed I/O
 
