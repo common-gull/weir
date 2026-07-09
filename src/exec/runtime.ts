@@ -1,4 +1,5 @@
-// Rungs 1 and 2 of the step-distribution ladder (docs/containerized-steps.md): map a step spec to
+// Rungs 1 and 2 of the step-distribution ladder (docs/containerized-steps.md) — the opt-in,
+// out-of-process side of `ctx.step` (the default being a host closure): map a step spec to
 // the argv the C2 runner (src/exec/spawn.ts) executes. Rung-1 is a local process — a `runtime` names
 // a pinned language shim (src/exec/shims/*) that speaks the C1 protocol, so an author ships just a
 // module (`export default (input) => output` for node, `def step(input): return output` for python)
