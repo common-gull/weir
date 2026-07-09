@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LogFrame } from './protocol.ts';
-import { buildArgv, type LocalStepSpec } from './runtime.ts';
+import { buildArgv, buildDockerArgv, type DockerStepSpec, type LocalStepSpec } from './runtime.ts';
 import { runProtocol } from './spawn.ts';
 
 const fixture = (name: string) => fileURLToPath(new URL(`./testdata/${name}`, import.meta.url));
@@ -38,6 +38,90 @@ test('rejects a missing module path', () => {
 test('rejects an unknown runtime (specs can arrive from untyped JSON)', () => {
     const spec = { runtime: 'ruby', module: 'x.rb' } as unknown as LocalStepSpec;
     expect(() => buildArgv(spec)).toThrow(/unknown step runtime/);
+});
+
+// ---- buildDockerArgv: runtime-form spec (#58) ----
+
+test('the node runtime form maps to the weir base image and runs the baked shim on a ro-mounted module', () => {
+    const argv = buildDockerArgv({ runtime: 'node', module: '/abs/step.ts' }, { scratch: '/scratch/7' });
+    expect(argv).toEqual([
+        'docker',
+        'run',
+        '--rm',
+        '-i',
+        '--network',
+        'none',
+        '-v',
+        '/scratch/7:/weir',
+        '-v',
+        '/abs/step.ts:/opt/weir/module.ts:ro',
+        'weir-node',
+        'node',
+        '/opt/weir/node-shim.ts',
+        '/opt/weir/module.ts',
+    ]);
+});
+
+test('the python runtime form maps to weir-python and the python shim', () => {
+    const argv = buildDockerArgv({ runtime: 'python', module: '/abs/step.py' }, { scratch: '/s' });
+    expect(argv.slice(-5)).toEqual([
+        '/abs/step.py:/opt/weir/module.py:ro',
+        'weir-python',
+        'python3',
+        '/opt/weir/python-shim.py',
+        '/opt/weir/module.py',
+    ]);
+});
+
+test('the runtime form resolves a relative module path to an absolute mount host', () => {
+    const argv = buildDockerArgv({ runtime: 'node', module: 'steps/resize.ts' }, { scratch: '/s' });
+    expect(argv).toContain(`${resolve('steps/resize.ts')}:/opt/weir/module.ts:ro`);
+    // the container-side module path stays fixed; only the host side of the mount varies.
+    expect(argv[argv.length - 1]).toBe('/opt/weir/module.ts');
+});
+
+test('the runtime form rejects a missing module path', () => {
+    expect(() => buildDockerArgv({ runtime: 'node', module: '' }, { scratch: '/s' })).toThrow(/requires a module path/);
+});
+
+test('the runtime form rejects an unknown runtime (specs can arrive from untyped JSON)', () => {
+    const spec = { runtime: 'ruby', module: 'x.rb' } as unknown as DockerStepSpec;
+    expect(() => buildDockerArgv(spec, { scratch: '/s' })).toThrow(/unknown step runtime/);
+});
+
+// ---- buildDockerArgv: network flag (#58) ----
+
+test('network:true drops --network none for the docker default bridge (image form)', () => {
+    const argv = buildDockerArgv({ image: 'img', network: true }, { scratch: '/s' });
+    expect(argv).not.toContain('--network');
+    expect(argv).not.toContain('none');
+    // the rest of the lockdown defaults are untouched.
+    expect(argv.slice(0, 4)).toEqual(['docker', 'run', '--rm', '-i']);
+    expect(argv).toContain('-v');
+    expect(argv).toContain('/s:/weir');
+});
+
+test('network:true drops --network none for the runtime form too', () => {
+    const argv = buildDockerArgv({ runtime: 'node', module: '/a/s.ts', network: true }, { scratch: '/s' });
+    expect(argv).not.toContain('--network');
+});
+
+test('the network flag defaults off, keeping --network none', () => {
+    const image = buildDockerArgv({ image: 'img' }, { scratch: '/s' });
+    const runtime = buildDockerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/s' });
+    expect(image.slice(4, 6)).toEqual(['--network', 'none']);
+    expect(runtime.slice(4, 6)).toEqual(['--network', 'none']);
+});
+
+test('image and module reach the argv as standalone elements, never shell-interpolated', () => {
+    // A host module path carrying shell metacharacters stays a single `-v` element; the injection
+    // boundary is the argv array, so it is never spliced into a command string.
+    const nasty = '/a b/step.ts; rm -rf /';
+    const argv = buildDockerArgv({ runtime: 'node', module: nasty }, { scratch: '/s' });
+    expect(argv).toContain(`${nasty}:/opt/weir/module.ts:ro`);
+    // the image name is likewise one element, even pinned by digest.
+    const image = `img@sha256:${'a'.repeat(64)}`;
+    expect(buildDockerArgv({ image, cmd: ['echo', 'hi'] }, { scratch: '/s' })).toContain(image);
 });
 
 test('runs a node module end-to-end and routes console output to the log channel', async () => {
