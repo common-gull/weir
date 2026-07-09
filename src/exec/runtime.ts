@@ -6,7 +6,7 @@
 // same spawn seam, with image-by-digest pinning in src/exec/docker.ts.
 
 import { $ } from 'bun';
-import { copyFile, mkdir, rm, stat } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -174,7 +174,10 @@ export function dockerCapabilityMounts(): DockerMount[] {
 // into the store afterward. A declared path that is a directory rides through the store as one tar
 // blob (archived on the way out, unpacked on the way in), so a repo checkout or dependency tree is a
 // single content-addressed artifact. Every declared path is confined to the scratch dir so a module
-// can't read or clobber files outside it via `..` or an absolute path.
+// can't read or clobber files outside it via `..` or an absolute path. Symlinks are that boundary's
+// third vector: a directory artifact must be symlink-free, else `tar` would store a link and recreate
+// it live in a *different* scratch dir on stage-in, where a later read/write would follow it out. So a
+// symlink is refused on archive (assertNoSymlinks / the lstat below) and again on unpack (stageInputs).
 
 /** Resolve `rel` under `base`, refusing a path that escapes the scratch dir. This is the filesystem
  *  boundary for staging — the analogue of the `$`-template injection boundary for shelling out. */
@@ -190,15 +193,47 @@ function resolveWithin(base: string, rel: string): string {
  *  scratch dir (which the engine always tears down) and is excluded from any archive of that dir. */
 const ARCHIVE_PREFIX = '.weir-archive-';
 
+/** Shared message for a symlink caught inside a directory artifact, on either side of the store. */
+function symlinkError(path: string): Error {
+    return new Error(`directory artifact contains a symlink, which could escape the scratch dir: ${path}`);
+}
+
+/** Refuse a directory artifact that contains any symlink, anywhere under `root`. `tar -c` stores a
+ *  symlink as a link (it does not follow it), and `tar -x` recreates it live on stage-in — into a
+ *  *different* scratch dir, where a later read or write through it would silently escape confinement.
+ *  Rejecting the whole tree keeps the store invariant "a 'dir' blob has no symlinks", so unpacking one
+ *  can never plant an escaping link. `readdir(withFileTypes)` reports each entry's own type via lstat,
+ *  so the walk sees a symlink as a symlink and never traverses into (dereferences) it. */
+async function assertNoSymlinks(root: string): Promise<void> {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+        const full = join(root, entry.name);
+        if (entry.isSymbolicLink()) throw symlinkError(full);
+        if (entry.isDirectory()) await assertNoSymlinks(full);
+    }
+}
+
 /** Deterministic-tar a directory tree into `archive`: sorted entries and zeroed mtime/ownership so
  *  the same tree content-addresses to the same hash across runs and machines. Uncompressed — gzip's
  *  header embeds a timestamp that would perturb the bytes, and the store dedups identical blobs. The
  *  exclude (passed as one interpolated arg so Bun's `$` can't glob-expand its `*`) drops a sibling
  *  temp archive when `dir` is the scratch root itself — a whole-scratch output — so a directory never
- *  captures the very tar being written from it. */
+ *  captures the very tar being written from it. Refuses a tree with any symlink first, so no escaping
+ *  link is ever archived (see assertNoSymlinks). */
 async function archiveDir(dir: string, archive: string): Promise<void> {
+    await assertNoSymlinks(dir);
     const exclude = `--exclude=./${ARCHIVE_PREFIX}*`;
     await $`tar ${exclude} --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf ${archive} -C ${dir} .`.quiet();
+}
+
+/** Scan a tar blob's member list and refuse it if any entry is a symlink, *before* it is extracted —
+ *  so an escaping link is caught without ever being materialized on the host fs (a link extracted
+ *  first and pruned after could already have been written through by a following member). `-tv`'s
+ *  verbose listing tags a symlink member with a leading `l`, exactly as `ls -l` does. Defense in depth:
+ *  archiveDir already refuses to store such a blob, so this only bites one that reached the store some
+ *  other way. */
+async function assertBlobHasNoSymlinks(blob: string): Promise<void> {
+    const listing = await $`tar -tvf ${blob}`.text();
+    if (listing.split('\n').some((line) => line.startsWith('l'))) throw symlinkError(blob);
 }
 
 /** Copy each declared input artifact from the store into the scratch dir before the step runs. A
@@ -208,6 +243,7 @@ export async function stageInputs(db: DB, storeDir: string, scratch: string, inp
         const dest = resolveWithin(scratch, path);
         const blob = getArtifact(storeDir, hash);
         if (artifactKind(db, hash) === 'dir') {
+            await assertBlobHasNoSymlinks(blob);
             await mkdir(dest, { recursive: true });
             await $`tar -xf ${blob} -C ${dest}`.quiet();
         } else {
@@ -233,7 +269,13 @@ export async function planOutputs(
     const map: Record<string, string> = {};
     for (const path of outputs) {
         const full = resolveWithin(scratch, path);
-        if ((await stat(full)).isDirectory()) {
+        const info = await lstat(full);
+        if (info.isSymbolicLink()) {
+            // `lstat`, not `stat`: a symlink output would otherwise be dereferenced — a directory link
+            // makes `tar -C link .` archive the outside target's content, a read escape past confinement.
+            throw new Error(`output path is a symlink, which could escape the scratch dir: ${path}`);
+        }
+        if (info.isDirectory()) {
             // Archive into the scratch dir, which the engine always tears down — so a rejected
             // extractor (commit never called) leaks no temp tar, mirroring the in-memory guarantee
             // the old byte-buffering path gave.

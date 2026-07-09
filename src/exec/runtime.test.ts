@@ -1,8 +1,11 @@
+import { $ } from 'bun';
 import { expect, test } from 'bun:test';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { putArtifact } from '../artifacts.ts';
 import { type DB, openDb } from '../db.ts';
 import type { LogFrame } from './protocol.ts';
 import { buildArgv, type LocalStepSpec, planOutputs, snapshotOutputs, stageInputs } from './runtime.ts';
@@ -175,6 +178,16 @@ async function withStaging(fn: (env: { db: DB; store: string; a: string; b: stri
     }
 }
 
+/** A directory outside every scratch dir, standing in for a symlink escape's target. */
+async function withOutsideDir(fn: (outside: string) => Promise<void>): Promise<void> {
+    const outside = await mkdtemp(join(tmpdir(), 'weir-outside-'));
+    try {
+        await fn(outside);
+    } finally {
+        await rm(outside, { recursive: true, force: true });
+    }
+}
+
 test('a directory output round-trips through the store with a stable content hash', async () => {
     await withStaging(async ({ db, store, a, b }) => {
         await mkdir(join(a, 'repo/sub'), { recursive: true });
@@ -238,5 +251,50 @@ test('staging still rejects a directory artifact whose declared path escapes the
             /escapes the scratch dir/,
         );
         await expect(snapshotOutputs(db, store, a, ['../escape'])).rejects.toThrow(/escapes the scratch dir/);
+    });
+});
+
+test('archiving a directory output containing a symlink is refused, so no link enters the store', async () => {
+    await withOutsideDir(async (outside) => {
+        await withStaging(async ({ db, store, a }) => {
+            await writeFile(join(outside, 'secret'), 'top secret');
+            await mkdir(join(a, 'tree'), { recursive: true });
+            await writeFile(join(a, 'tree/real.txt'), 'ok');
+            await symlink(outside, join(a, 'tree/escape'));
+
+            await expect(snapshotOutputs(db, store, a, ['tree'])).rejects.toThrow(/symlink/);
+            // Nothing was committed: the tree never became a stage-in-able blob.
+            expect(db.query(`SELECT COUNT(*) AS c FROM artifacts`).get()).toEqual({ c: 0 });
+        });
+    });
+});
+
+test('a declared output that is itself a symlink to a directory is refused (no dereference on archive)', async () => {
+    await withOutsideDir(async (outside) => {
+        await withStaging(async ({ db, store, a }) => {
+            await writeFile(join(outside, 'secret'), 'top secret');
+            await symlink(outside, join(a, 'linkdir'));
+            await expect(snapshotOutputs(db, store, a, ['linkdir'])).rejects.toThrow(/symlink/);
+        });
+    });
+});
+
+test('staging refuses a directory blob carrying a symlink, closing the escape on unpack', async () => {
+    await withOutsideDir(async (outside) => {
+        await withStaging(async ({ db, store, a, b }) => {
+            await writeFile(join(outside, 'secret'), 'top secret');
+            // A 'dir' blob the guarded archive path would never produce: a raw tar carrying a live
+            // symlink to a dir outside every scratch. Modelling a blob that reached the store elsewise.
+            await mkdir(join(a, 'tree'), { recursive: true });
+            await symlink(outside, join(a, 'tree/escape'));
+            const tar = join(a, 'evil.tar');
+            await $`tar -cf ${tar} -C ${join(a, 'tree')} .`.quiet();
+            const hash = await putArtifact(db, store, tar, 'dir');
+
+            await expect(stageInputs(db, store, b, [{ hash, path: 'tree' }])).rejects.toThrow(/symlink/);
+            // The link never materialized under the scratch dir, so the outside secret stays unreachable.
+            expect(existsSync(join(b, 'tree/escape'))).toBe(false);
+            expect(await readFile(join(outside, 'secret'), 'utf8')).toBe('top secret');
+        });
     });
 });
