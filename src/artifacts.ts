@@ -6,7 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, rename, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DB } from './db.ts';
 
@@ -36,26 +36,9 @@ export async function hashFile(path: string): Promise<string> {
     return h.digest('hex');
 }
 
-/** Place `src` in the store under `hash` (atomic temp+rename so a crash mid-write can't leave a
- *  truncated file masquerading under a valid content hash) and record its row. A path source copies
- *  at the OS level — no heap buffering — so a large blob lands without being read wholly into memory;
- *  raw bytes are already in memory. Idempotent: an already-stored hash re-copies nothing (dedup). */
-async function storeBlob(
-    db: DB,
-    storeDir: string,
-    src: string | Uint8Array,
-    hash: string,
-    size: number,
-    kind: ArtifactKind,
-): Promise<void> {
-    const dest = join(storeDir, hash);
-    await mkdir(storeDir, { recursive: true });
-    if (!existsSync(dest)) {
-        const tmp = `${dest}.${crypto.randomUUID()}.tmp`;
-        if (typeof src === 'string') await copyFile(src, tmp);
-        else await writeFile(tmp, src);
-        await rename(tmp, dest);
-    }
+/** Record a stored blob's row — size + kind + first-seen time, keyed by content hash. Idempotent
+ *  (INSERT OR IGNORE) so a repeat put of already-stored content leaves the original row untouched. */
+function recordArtifact(db: DB, hash: string, size: number, kind: ArtifactKind): void {
     db.query(`INSERT OR IGNORE INTO artifacts (hash, size, kind, created_at) VALUES (?, ?, ?, ?)`).run(
         hash,
         size,
@@ -64,23 +47,44 @@ async function storeBlob(
     );
 }
 
-/** Store `src` (a file path or raw bytes) under `storeDir` and return its sha256 hex hash. A path is
- *  streamed for both the hash and the copy, so a large file stores without buffering wholly in
- *  memory. `kind` tags the blob 'file' (default) or 'dir' (a directory tar, see stageInputs).
- *  Identical content reuses the same key, so a repeat put is a no-op on disk (dedup). */
+/** Store `src` (a file path or raw bytes) under `storeDir` and return its sha256 hex hash. A path
+ *  source is copied into a private temp and then hashed *from that copy*, so the bytes landed under
+ *  `hash` are provably the ones it names: hashing the source and copying it in two independent passes
+ *  could store bytes that no longer match `hash` if the source is mutated (or read inconsistently)
+ *  between them, corrupting the content-addressing dedup and integrity rely on. Copying at the OS
+ *  level keeps a large file off the heap; an atomic temp+rename means a crash mid-write can't leave a
+ *  truncated file under a valid hash. `kind` tags the blob 'file' (default) or 'dir' (a directory tar,
+ *  see stageInputs). Identical content reuses the same key, so a repeat put is a no-op on disk. */
 export async function putArtifact(
     db: DB,
     storeDir: string,
     src: string | Uint8Array,
     kind: ArtifactKind = 'file',
 ): Promise<string> {
+    await mkdir(storeDir, { recursive: true });
     if (typeof src === 'string') {
-        const hash = await hashFile(src);
-        await storeBlob(db, storeDir, src, hash, (await stat(src)).size, kind);
+        const tmp = join(storeDir, `${crypto.randomUUID()}.tmp`);
+        await copyFile(src, tmp);
+        const hash = await hashFile(tmp);
+        const size = (await stat(tmp)).size;
+        const dest = join(storeDir, hash);
+        // Rename the just-hashed copy into place, or drop it if the content is already stored — either
+        // way the store keeps one file per hash and leaves no stray temp behind.
+        if (existsSync(dest)) await rm(tmp, { force: true });
+        else await rename(tmp, dest);
+        recordArtifact(db, hash, size, kind);
         return hash;
     }
+    // Raw bytes are already in memory: the buffer hashed is the buffer written, so no second read can
+    // diverge from `hash`.
     const hash = artifactHash(src);
-    await storeBlob(db, storeDir, src, hash, src.byteLength, kind);
+    const dest = join(storeDir, hash);
+    if (!existsSync(dest)) {
+        const tmp = `${dest}.${crypto.randomUUID()}.tmp`;
+        await writeFile(tmp, src);
+        await rename(tmp, dest);
+    }
+    recordArtifact(db, hash, src.byteLength, kind);
     return hash;
 }
 

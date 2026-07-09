@@ -41,6 +41,25 @@ test('stores a file path by reading its bytes', async () => {
     expect(await readFile(getArtifact(dir, hash), 'utf8')).toBe('from a file');
 });
 
+test('a path source lands bytes that actually hash to the key it is stored under', async () => {
+    // The content-addressing invariant: the blob under `hash` must itself hash to `hash`. Hashing the
+    // source and copying it in separate passes could break this if the source changed between them.
+    const file = join(dir, 'input.txt');
+    await writeFile(file, 'content-addressed');
+    const hash = await putArtifact(db, dir, file);
+    expect(await hashFile(getArtifact(dir, hash))).toBe(hash);
+});
+
+test('a repeated path source dedups to one file and one row with no leftover temp', async () => {
+    const file = join(dir, 'input.txt');
+    await writeFile(file, 'same on disk');
+    const first = await putArtifact(db, dir, file);
+    const second = await putArtifact(db, dir, file);
+    expect(second).toBe(first);
+    expect(readdirSync(dir).sort()).toEqual(['input.txt', first].sort());
+    expect(db.query(`SELECT COUNT(*) AS c FROM artifacts`).get()).toEqual({ c: 1 });
+});
+
 test('identical content dedups to one key, one file, one row', async () => {
     const first = await putArtifact(db, dir, new TextEncoder().encode('same'));
     const second = await putArtifact(db, dir, new TextEncoder().encode('same'));
