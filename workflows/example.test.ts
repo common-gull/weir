@@ -16,8 +16,9 @@ test('example: pick-name/greet run as memoized exec steps; read-platform stays o
     const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
     expect(JSON.parse(run.result)).toEqual({ greeting: 'hello, world', platform: process.platform });
 
-    // The two converted steps run through the exec runtime (a subprocess) and memoize like any step;
-    // read-platform remains a host closure. This locks in the container-by-default authoring model.
+    // pick-name/greet run through the exec runtime (a subprocess) via the spec overload and memoize
+    // like any step; read-platform is a plain closure step. This locks in the closure-default model
+    // with the transitional spec overload alongside it.
     const steps = db.query(`SELECT name, kind FROM steps WHERE run_id = ? ORDER BY seq`).all(id) as {
         name: string;
         kind: string;

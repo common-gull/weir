@@ -2,13 +2,7 @@ import { expect, test, beforeEach } from 'bun:test';
 import { openDb, type DB } from './db.ts';
 import { clearRegistry, defineWorkflow, executeRun } from './engine.ts';
 import { createRun } from './runs.ts';
-import {
-    hasCapability,
-    knownCapabilities,
-    requireCapability,
-    resolveExecEnv,
-    withCapabilities,
-} from './capabilities.ts';
+import { hasCapability, requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
 
 // A synthetic daemon env: a secret a capability names (GH_TOKEN) plus one nothing names (WEIR_SNOOP).
 const daemonEnv = { PATH: '/usr/bin', GH_TOKEN: 'gh-secret', WEIR_SNOOP: 'daemon-only' };
@@ -22,8 +16,8 @@ beforeEach(() => {
 });
 
 test('outward action denied when the workflow lacks the capability', async () => {
-    defineWorkflow('nogrant', { capabilities: ['host-exec'] }, async (ctx) => {
-        await ctx.runUnsafelyOnHost('push', () => {
+    defineWorkflow('nogrant', async (ctx) => {
+        await ctx.step('push', () => {
             requireCapability('git-push');
             return 1;
         });
@@ -37,8 +31,8 @@ test('outward action denied when the workflow lacks the capability', async () =>
 
 test('outward action allowed when the workflow declares the capability', async () => {
     let allowed = false;
-    defineWorkflow('grant', { capabilities: ['git-push', 'host-exec'] }, async (ctx) => {
-        await ctx.runUnsafelyOnHost('push', () => {
+    defineWorkflow('grant', { capabilities: ['git-push'] }, async (ctx) => {
+        await ctx.step('push', () => {
             requireCapability('git-push');
             allowed = hasCapability('git-push');
             return 1;
@@ -50,13 +44,9 @@ test('outward action allowed when the workflow declares the capability', async (
     expect(allowed).toBe(true);
 });
 
-test('host-exec is a discoverable built-in capability', () => {
-    expect(knownCapabilities().has('host-exec')).toBe(true);
-});
-
 test('resolveExecEnv withholds daemon secrets from a step declaring no credential capability', () => {
-    // host-exec authorizes spawning host code, not inheriting credentials — so its env is baseline-only.
-    const env = resolveWith(['host-exec']);
+    // A step declaring no credential capability inherits none of the daemon's secrets.
+    const env = resolveWith([]);
     expect(env.GH_TOKEN).toBeUndefined();
     expect(env.WEIR_SNOOP).toBeUndefined();
     expect(env.PATH).toBe('/usr/bin'); // the operational baseline still passes through
@@ -65,7 +55,7 @@ test('resolveExecEnv withholds daemon secrets from a step declaring no credentia
 test('resolveExecEnv passes HOME through as an operational baseline, not a credential', () => {
     // HOME lets git/ssh and the runtimes resolve their per-user config (~/.gitconfig, ~/.ssh, ~/.bun);
     // it names no secret, so it forwards even for a step declaring no credential capability.
-    const env = withCapabilities({ workflow: 'w', caps: new Set(['host-exec']) }, () =>
+    const env = withCapabilities({ workflow: 'w', caps: new Set<string>() }, () =>
         resolveExecEnv({ PATH: '/usr/bin', HOME: '/home/weir', GH_TOKEN: 'gh-secret' }),
     );
     expect(env.HOME).toBe('/home/weir');
@@ -76,7 +66,7 @@ test('resolveExecEnv forwards non-secret operational vars (locale, tz, tmpdir, p
     // These aren't credentials, so they pass through even for a step declaring no credential capability;
     // withholding them silently changed behavior (locale-parsed output, temp location, proxy routing —
     // the last of which a 'network'-holding step needs to reach the network in a proxied deployment).
-    const env = withCapabilities({ workflow: 'w', caps: new Set(['host-exec']) }, () =>
+    const env = withCapabilities({ workflow: 'w', caps: new Set<string>() }, () =>
         resolveExecEnv({
             PATH: '/usr/bin',
             LANG: 'en_US.UTF-8',
@@ -94,7 +84,7 @@ test('resolveExecEnv forwards non-secret operational vars (locale, tz, tmpdir, p
 });
 
 test('resolveExecEnv forwards only the credential vars a declared capability names', () => {
-    const env = resolveWith(['host-exec', 'gh-pr']);
+    const env = resolveWith(['gh-pr']);
     expect(env.GH_TOKEN).toBe('gh-secret'); // gh-pr authorizes GH_TOKEN…
     expect(env.WEIR_SNOOP).toBeUndefined(); // …but nothing else the daemon holds
     expect(env.PATH).toBe('/usr/bin');
