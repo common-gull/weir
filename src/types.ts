@@ -52,11 +52,11 @@ export interface StepOpts<T = unknown> {
     input?: unknown; // payload for a spec step — marshalled into the exec runtime's input frame
 }
 
-/** The container-step body `ctx.step` runs: a module the exec runtime executes in a subprocess
- *  speaking the stdio protocol. `ctx.step(name, spec, { input })` builds the runtime's argv, runs the
- *  module, and memoizes its JSON result like any step (the in-process `runUnsafelyOnHost` included).
- *  An optional `extract` (#50) normalizes the step's raw output on the host; it defaults to the C1
- *  frame decoder, so a protocol-speaking step is unaffected. */
+/** The exec-step body the `ctx.step` spec overload runs: a module the exec runtime executes in a
+ *  subprocess speaking the stdio protocol. `ctx.step(name, spec, { input })` builds the runtime's argv,
+ *  runs the module, and memoizes its JSON result like any step. An optional `extract` (#50) normalizes
+ *  the step's raw output on the host; it defaults to the C1 frame decoder, so a protocol-speaking step
+ *  is unaffected. */
 export type StepSpec = LocalStepSpec;
 
 /** A spec that declares `outputs`: after the run, the engine snapshots each declared path from the
@@ -88,7 +88,7 @@ export interface ScheduleDef {
     backfillMax?: number;
 }
 
-export type Capability = 'git-push' | 'gh-pr' | 'gh-comment' | 'network' | 'host-exec' | (string & {});
+export type Capability = 'git-push' | 'gh-pr' | 'gh-comment' | 'network' | (string & {});
 
 export interface WorkflowOpts {
     schedule?: ScheduleDef;
@@ -105,22 +105,20 @@ export interface Ctx {
     readonly input: unknown;
     readonly capabilities: ReadonlySet<Capability>;
 
-    /** A container step: its body is a relocatable `(input) => output` module the exec runtime runs
-     *  in its own subprocess (src/exec), memoized/replayed/retried exactly like any step. Declaring
-     *  `outputs` resolves to the module's result paired with the content hashes those outputs were
-     *  snapshotted to. A rung-1 exec step runs on the host with no isolation, so it's gated on the
-     *  'host-exec' capability. Closures are no longer accepted — host-touching work that must run
-     *  in-process goes on {@link runUnsafelyOnHost}, and passing a function throws. */
+    /** A step: `ctx.step(name, fn)` runs a closure in-process on the host, memoized/replayed/retried
+     *  so a failed run resumes from it. This is the default surface for host-integration work.
+     *
+     *  A transitional overload accepts a `StepSpec` instead of a closure, routing the step to the exec
+     *  runtime (src/exec) as its own subprocess; declaring `outputs` resolves to the module's result
+     *  paired with the content hashes those outputs were snapshotted to. Kept until `ctx.containerStep`
+     *  lands as the dedicated exec surface. Dispatch is by `typeof` — a function is a host closure, an
+     *  object is a spec — and both key identically under replay. */
+    step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     step<T = unknown>(name: string, spec: StepSpecWithOutputs, opts?: StepOpts<T>): Promise<ExecResult<T>>;
     step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
-    /** The host escape hatch: run a closure in-process on the host with full daemon privileges (no
-     *  isolation). Gated on the 'host-exec' capability; identical memo/replay/retry semantics to
-     *  {@link step}. Only host-touching work belongs here — pure/transform work is a container `step`. */
-    runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     loop<T>(opts: LoopOpts<T>, body: (it: LoopCtx) => T | Promise<T>): Promise<T>;
     /** Fan out `fn` over `items` with bounded concurrency, each invocation memoized as its own step.
-     *  `fn` runs in-process on the host (the same unsandboxed privilege as {@link runUnsafelyOnHost}),
-     *  so `map` is gated on the 'host-exec' capability. */
+     *  `fn` runs in-process on the host, like a closure {@link step}. */
     map<I, O>(
         items: I[],
         fn: (item: I, index: number) => O | Promise<O>,
@@ -159,15 +157,12 @@ export interface StepCtx {
 export interface LoopCtx {
     readonly index: number;
     readonly prev: unknown; // previous iteration's return value (undefined on first)
-    /** A per-iteration container step — the loop-scoped counterpart of {@link Ctx.step}: a
-     *  `{ runtime, module }` spec the exec runtime runs in a subprocess, auto-namespaced per
-     *  iteration. Closures are no longer accepted — host-touching iteration work goes on
-     *  {@link LoopCtx.runUnsafelyOnHost}, and passing a function throws. */
+    /** The loop-scoped counterpart of {@link Ctx.step}, auto-namespaced per iteration: `it.step(name,
+     *  fn)` runs a closure in-process on the host, and the transitional `StepSpec` overload routes to
+     *  the exec runtime. Same per-iteration `loop#L:i:name` keying for both. */
+    step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     step<T = unknown>(name: string, spec: StepSpecWithOutputs, opts?: StepOpts<T>): Promise<ExecResult<T>>;
     step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
-    /** Loop-scoped counterpart to `Ctx.runUnsafelyOnHost`: same per-iteration namespacing as
-     *  `step`, but runs a closure on the host with full daemon privileges. Gated on 'host-exec'. */
-    runUnsafelyOnHost<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
 }
 
 export class SkipSignal {

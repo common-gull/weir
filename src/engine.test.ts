@@ -56,21 +56,21 @@ const stepNames = (runId: string) =>
 test('retry-from-failure: completed steps do not re-run; execution resumes at the failure', async () => {
     const ran: string[] = [];
     let failReview = true;
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
-        await ctx.runUnsafelyOnHost('a', () => {
+    defineWorkflow('t', async (ctx) => {
+        await ctx.step('a', () => {
             ran.push('a');
             return 1;
         });
-        await ctx.runUnsafelyOnHost('b', () => {
+        await ctx.step('b', () => {
             ran.push('b');
             return 2;
         });
-        await ctx.runUnsafelyOnHost('c', () => {
+        await ctx.step('c', () => {
             ran.push('c');
             if (failReview) throw new Error('boom');
             return 3;
         });
-        await ctx.runUnsafelyOnHost('d', () => {
+        await ctx.step('d', () => {
             ran.push('d');
             return 4;
         });
@@ -94,10 +94,10 @@ test('retry-from-failure: completed steps do not re-run; execution resumes at th
 test('ctx.now() is memoized: stable across a retry', async () => {
     const observed: number[] = [];
     let boom = true;
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+    defineWorkflow('t', async (ctx) => {
         const n = ctx.now();
         observed.push(n);
-        await ctx.runUnsafelyOnHost('x', () => {
+        await ctx.step('x', () => {
             if (boom) throw new Error('x');
             return 1;
         });
@@ -115,9 +115,9 @@ test('ctx.now() is memoized: stable across a retry', async () => {
 
 test('ctx.loop: bounded auto-iteration, fails twice then succeeds -> exactly 3 iterations', async () => {
     let attempts = 0;
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+    defineWorkflow('t', async (ctx) => {
         const out = await ctx.loop({ max: 5, until: (r: { ok: boolean }) => r.ok }, async (it) => {
-            const ok = (await it.runUnsafelyOnHost('try', () => {
+            const ok = (await it.step('try', () => {
                 attempts++;
                 return attempts >= 3;
             })) as boolean;
@@ -132,7 +132,7 @@ test('ctx.loop: bounded auto-iteration, fails twice then succeeds -> exactly 3 i
 });
 
 test('ctx.map: per-item isolation — one item fails, the rest succeed', async () => {
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+    defineWorkflow('t', async (ctx) => {
         return ctx.map([0, 1, 2, 3, 4], (n) => {
             if (n === 3) throw new Error('bad');
             return n * 10;
@@ -151,20 +151,24 @@ test('ctx.map: per-item isolation — one item fails, the rest succeed', async (
     ]);
 });
 
-test('ctx.map: denied without the host-exec capability — mapper never runs, no seq consumed', async () => {
-    let ran = false;
+test('ctx.map: runs without any capability declaration', async () => {
+    let ran = 0;
     defineWorkflow('nomap', {}, async (ctx) => {
         return ctx.map([1, 2, 3], (n) => {
-            ran = true;
-            return n;
+            ran++;
+            return n * 2;
         });
     });
     const id = createRun(db, 'nomap');
-    expect(await executeRun(db, id)).toBe('failed'); // map runs host closures → needs host-exec
-    expect(ran).toBe(false); // gate throws before any item's mapper runs
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(run.error).toContain('host-exec');
-    expect(stepNames(id)).toEqual([]); // no seq consumed on a denied call
+    expect(await executeRun(db, id)).toBe('completed'); // map needs no capability
+    expect(ran).toBe(3);
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toEqual([
+        { ok: true, value: 2 },
+        { ok: true, value: 4 },
+        { ok: true, value: 6 },
+    ]);
+    expect(stepNames(id)).toEqual(['map#0[0]', 'map#0[1]', 'map#0[2]']); // each item memoized as its own step
 });
 
 test('ctx.once: rate-limit window — first true, second false', async () => {
@@ -199,16 +203,16 @@ test('skip: workflow returns ctx.skip -> completed with skipped result', async (
 
 test('retry --from: discards memo at/after a step so it re-runs', async () => {
     const ran: string[] = [];
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
-        await ctx.runUnsafelyOnHost('a', () => {
+    defineWorkflow('t', async (ctx) => {
+        await ctx.step('a', () => {
             ran.push('a');
             return 1;
         });
-        await ctx.runUnsafelyOnHost('b', () => {
+        await ctx.step('b', () => {
             ran.push('b');
             return 2;
         });
-        await ctx.runUnsafelyOnHost('c', () => {
+        await ctx.step('c', () => {
             ran.push('c');
             return 3;
         });
@@ -227,11 +231,11 @@ test('retry --from: discards memo at/after a step so it re-runs', async () => {
 test('ctx.once() is memoized: a retry replays the same claim result (no seq drift)', async () => {
     const seen: boolean[] = [];
     let boom = true;
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
+    defineWorkflow('t', async (ctx) => {
         const first = (await ctx.once('slot', '1h')) as boolean;
         seen.push(first);
-        if (first) await ctx.runUnsafelyOnHost('gated', () => 1); // a memoized step behind the once() gate
-        await ctx.runUnsafelyOnHost('after', () => {
+        if (first) await ctx.step('gated', () => 1); // a memoized step behind the once() gate
+        await ctx.step('after', () => {
             if (boom) throw new Error('x');
             return 2;
         });
@@ -246,8 +250,8 @@ test('ctx.once() is memoized: a retry replays the same claim result (no seq drif
 });
 
 test('approveRun resumes the parked gate by name and rejects non-parked runs', async () => {
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
-        await ctx.runUnsafelyOnHost('before', () => 1);
+    defineWorkflow('t', async (ctx) => {
+        await ctx.step('before', () => 1);
         const payload = await ctx.waitForApproval('deploy'); // gate name != default 'human'
         return { approved: payload };
     });
@@ -263,32 +267,15 @@ test('approveRun resumes the parked gate by name and rejects non-parked runs', a
     expect(() => approveRun(db, id)).toThrow(/not awaiting approval/); // completed run can't be re-approved
 });
 
-test('runUnsafelyOnHost: denied without the host-exec capability, naming it', async () => {
-    let ran = false;
-    defineWorkflow('nohost', {}, async (ctx) => {
-        await ctx.runUnsafelyOnHost('touch', () => {
-            ran = true;
-            return 1;
-        });
-        return 'ok';
-    });
-    const id = createRun(db, 'nohost');
-    expect(await executeRun(db, id)).toBe('failed');
-    expect(ran).toBe(false); // gate throws before the closure runs
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(run.error).toContain('host-exec');
-    expect(stepNames(id)).toEqual([]); // no seq consumed on a denied call
-});
-
-test('runUnsafelyOnHost: granted -> runs in-process with step-identical memo/replay', async () => {
+test('ctx.step(fn): a closure runs in-process with memo/replay identical to any step', async () => {
     const ran: string[] = [];
     let boom = true;
-    defineWorkflow('host', { capabilities: ['host-exec'] }, async (ctx) => {
-        await ctx.runUnsafelyOnHost('a', () => {
+    defineWorkflow('host', async (ctx) => {
+        await ctx.step('a', () => {
             ran.push('a');
             return 1;
         });
-        await ctx.runUnsafelyOnHost('b', () => {
+        await ctx.step('b', () => {
             ran.push('b');
             if (boom) throw new Error('boom');
             return 2;
@@ -298,97 +285,57 @@ test('runUnsafelyOnHost: granted -> runs in-process with step-identical memo/rep
     const id = createRun(db, 'host');
     expect(await executeRun(db, id)).toBe('failed');
     expect(ran).toEqual(['a', 'b']);
-    expect(stepNames(id)).toEqual(['a#0']); // host step memoized like any 'step'
+    expect(stepNames(id)).toEqual(['a#0']); // closure step memoized like any 'step'
 
     ran.length = 0;
     boom = false;
     retryRun(db, id);
     expect(await executeRun(db, id)).toBe('completed');
-    expect(ran).toEqual(['b']); // memoized host step replays, does not re-run
+    expect(ran).toEqual(['b']); // memoized closure step replays, does not re-run
     expect(stepNames(id)).toEqual(['a#0', 'b#0']);
 });
 
-test('ctx.step(fn): a closure is rejected loudly — no in-process fallback, no seq consumed', async () => {
-    let ran = false;
-    defineWorkflow('closurestep', { capabilities: ['host-exec'] }, async (ctx) => {
-        // The closure overload is gone at the type level; a JS caller that still passes a function
-        // hits the runtime guard rather than silently running in-process.
-        const step = ctx.step as unknown as (name: string, fn: () => unknown) => Promise<unknown>;
-        await step('legacy', () => {
-            ran = true;
-            return 1;
-        });
-        return 'ok';
-    });
+test('ctx.step: a closure dispatches to an in-process step (kind "step")', async () => {
+    defineWorkflow('closurestep', async (ctx) => ctx.step('run', () => 42));
     const id = createRun(db, 'closurestep');
-    expect(await executeRun(db, id)).toBe('failed');
-    expect(ran).toBe(false); // the guard throws before the closure could run
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(run.error).toContain('runUnsafelyOnHost'); // points the caller at the host hatch
-    expect(stepNames(id)).toEqual([]); // thrown before any seq/memo is consumed
+    expect(await executeRun(db, id)).toBe('completed');
+    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+    expect(JSON.parse(run.result)).toBe(42);
+    // A closure is dispatched by typeof to the in-process path: kind 'step', same key shape as a spec.
+    const step = db.query(`SELECT kind, key FROM steps WHERE run_id = ?`).get(id) as { kind: string; key: string };
+    expect(step).toEqual({ kind: 'step', key: 'run#0' });
 });
 
-test('loop it.runUnsafelyOnHost: denied without host-exec, no seq consumed', async () => {
-    let ran = false;
-    defineWorkflow('loopnohost', {}, async (ctx) => {
-        await ctx.loop({ max: 3, until: () => true }, async (it) => {
-            await it.runUnsafelyOnHost('touch', () => {
-                ran = true;
-                return 1;
+test('it.step(fn): a loop closure memoizes and replays across a retry, keyed per iteration', async () => {
+    let runs = 0;
+    let boom = true;
+    defineWorkflow('loophost', async (ctx) => {
+        await ctx.loop({ max: 2, until: () => true }, async (it) => {
+            await it.step('work', () => {
+                runs++;
+                return it.index;
             });
         });
-        return 'ok';
-    });
-    const id = createRun(db, 'loopnohost');
-    expect(await executeRun(db, id)).toBe('failed');
-    expect(ran).toBe(false); // gate throws before the closure runs
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(run.error).toContain('host-exec');
-    expect(stepNames(id)).toEqual([]);
-});
-
-test('loop it.runUnsafelyOnHost: granted -> per-iteration key identical to it.step', async () => {
-    let attempts = 0;
-    defineWorkflow('loophost', { capabilities: ['host-exec'] }, async (ctx) => {
-        return ctx.loop({ max: 5, until: (r: { ok: boolean }) => r.ok }, async (it) => {
-            const ok = (await it.runUnsafelyOnHost('try', () => {
-                attempts++;
-                return attempts >= 3;
-            })) as boolean;
-            return { ok };
+        await ctx.step('after', () => {
+            if (boom) throw new Error('boom');
+            return 'done';
         });
+        return 'ok';
     });
     const id = createRun(db, 'loophost');
-    expect(await executeRun(db, id)).toBe('completed');
-    expect(attempts).toBe(3);
-    // Same key shape as it.step, so migrating it.step -> it.runUnsafelyOnHost is replay-stable.
-    expect(stepNames(id)).toEqual(['loop#0:0:try', 'loop#0:1:try', 'loop#0:2:try']);
-});
+    expect(await executeRun(db, id)).toBe('failed'); // the loop closure runs, then `after` throws
+    expect(runs).toBe(1); // until:()=>true breaks after the first iteration
+    expect(stepNames(id)).toEqual(['loop#0:0:work']); // per-iteration `loop#L:i:name` key, unchanged
 
-test('it.step(fn): a closure in a loop is rejected loudly — no in-process fallback, no seq consumed', async () => {
-    let ran = false;
-    defineWorkflow('loopclosure', { capabilities: ['host-exec'] }, async (ctx) => {
-        await ctx.loop({ max: 3, until: () => true }, async (it) => {
-            // The closure overload is gone at the type level; a JS caller that still passes a function
-            // hits the runtime guard rather than silently running in-process (a host-exec bypass).
-            const step = it.step as unknown as (name: string, fn: () => unknown) => Promise<unknown>;
-            await step('legacy', () => {
-                ran = true;
-                return 1;
-            });
-        });
-        return 'ok';
-    });
-    const id = createRun(db, 'loopclosure');
-    expect(await executeRun(db, id)).toBe('failed');
-    expect(ran).toBe(false); // the guard throws before the closure could run
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(run.error).toContain('it.runUnsafelyOnHost'); // points the caller at the loop host hatch
-    expect(stepNames(id)).toEqual([]); // thrown before any seq/memo is consumed
+    boom = false;
+    retryRun(db, id);
+    expect(await executeRun(db, id)).toBe('completed');
+    expect(runs).toBe(1); // the memoized loop closure replayed — did NOT re-run
+    expect(stepNames(id)).toEqual(['loop#0:0:work', 'after#0']);
 });
 
 test('it.step spec: runs a container step per iteration in the exec runtime', async () => {
-    defineWorkflow('loopexec', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('loopexec', async (ctx) =>
         ctx.loop({ max: 2 }, (it) => it.step('run', { runtime: 'node', module: nodeStep }, { input: { i: it.index } })),
     );
     const id = createRun(db, 'loopexec');
@@ -408,25 +355,8 @@ test('it.step spec: runs a container step per iteration in the exec runtime', as
     ]);
 }, 20_000);
 
-test('ctx.step spec: denied without the host-exec capability, no subprocess spawned, no seq consumed', async () => {
-    defineWorkflow('nohostexec', {}, async (ctx) => {
-        await ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 42 } });
-        return 'ok';
-    });
-    const id = createRun(db, 'nohostexec');
-    expect(await executeRun(db, id)).toBe('failed'); // gate throws before spawning the module
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(run.error).toContain('host-exec');
-    expect(stepNames(id)).toEqual([]); // no seq consumed on a denied call
-    // No subprocess ran, so no step.log events were emitted by the module.
-    const logs = db.query(`SELECT count(*) AS c FROM events WHERE run_id = ? AND type = 'step.log'`).get(id) as {
-        c: number;
-    };
-    expect(logs.c).toBe(0);
-});
-
 test('ctx.step spec: runs a node module in a subprocess and memoizes its JSON result', async () => {
-    defineWorkflow('exec', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('exec', async (ctx) =>
         ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 42 } }),
     );
     const id = createRun(db, 'exec');
@@ -448,9 +378,9 @@ test('ctx.step spec: runs a node module in a subprocess and memoizes its JSON re
 
 test('ctx.step spec: a retry replays the memoized exec result without re-running the subprocess', async () => {
     let boom = true;
-    defineWorkflow('exec', { capabilities: ['host-exec'] }, async (ctx) => {
+    defineWorkflow('exec', async (ctx) => {
         const r = await ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 1 } });
-        await ctx.runUnsafelyOnHost('after', () => {
+        await ctx.step('after', () => {
             if (boom) throw new Error('boom');
             return 2;
         });
@@ -477,9 +407,7 @@ test('ctx.step spec: a retry replays the memoized exec result without re-running
 
 test('ctx.step spec: a step with no credential capability runs with a secret-free env', async () => {
     await withDaemonSecrets(async () => {
-        defineWorkflow('exec', { capabilities: ['host-exec'] }, (ctx) =>
-            ctx.step('probe-env', { runtime: 'node', module: nodeEnv }),
-        );
+        defineWorkflow('exec', (ctx) => ctx.step('probe-env', { runtime: 'node', module: nodeEnv }));
         const id = createRun(db, 'exec');
         expect(await executeRun(db, id)).toBe('completed');
         const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
@@ -490,7 +418,7 @@ test('ctx.step spec: a step with no credential capability runs with a secret-fre
 
 test('ctx.step spec: a step declaring gh-pr receives GH_TOKEN (only) in its env', async () => {
     await withDaemonSecrets(async () => {
-        defineWorkflow('exec', { capabilities: ['host-exec', 'gh-pr'] }, (ctx) =>
+        defineWorkflow('exec', { capabilities: ['gh-pr'] }, (ctx) =>
             ctx.step('probe-env', { runtime: 'node', module: nodeEnv }),
         );
         const id = createRun(db, 'exec');
@@ -503,12 +431,12 @@ test('ctx.step spec: a step declaring gh-pr receives GH_TOKEN (only) in its env'
 
 test('retryRun --from matches step names exactly (no substring over-delete)', async () => {
     const ran: string[] = [];
-    defineWorkflow('t', { capabilities: ['host-exec'] }, async (ctx) => {
-        await ctx.runUnsafelyOnHost('redeploy-check', () => {
+    defineWorkflow('t', async (ctx) => {
+        await ctx.step('redeploy-check', () => {
             ran.push('redeploy-check');
             return 1;
         });
-        await ctx.runUnsafelyOnHost('deploy', () => {
+        await ctx.step('deploy', () => {
             ran.push('deploy');
             return 2;
         });
@@ -524,7 +452,7 @@ test('retryRun --from matches step names exactly (no substring over-delete)', as
 
 test('exec artifacts: declared outputs are content-addressed into the store and recorded in the memo', async () => {
     const deps = await artifactDeps();
-    defineWorkflow('produce', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('produce', async (ctx) =>
         ctx.step(
             'make',
             { runtime: 'node', module: writer, outputs: ['out.txt'] },
@@ -548,7 +476,7 @@ test('exec artifacts: declared outputs are content-addressed into the store and 
 
 test('exec artifacts: a downstream step receives declared input artifacts staged into its scratch', async () => {
     const deps = await artifactDeps();
-    defineWorkflow('chain', { capabilities: ['host-exec'] }, async (ctx) => {
+    defineWorkflow('chain', async (ctx) => {
         const a = await ctx.step(
             'make',
             { runtime: 'node', module: writer, outputs: ['out.txt'] },
@@ -571,13 +499,13 @@ test('exec artifacts: a downstream step receives declared input artifacts staged
 test('exec artifacts: re-running an identical step replays the stored artifact instead of rebuilding', async () => {
     const deps = await artifactDeps();
     let boom = true;
-    defineWorkflow('rebuild', { capabilities: ['host-exec'] }, async (ctx) => {
+    defineWorkflow('rebuild', async (ctx) => {
         const a = await ctx.step(
             'make',
             { runtime: 'node', module: writer, outputs: ['out.txt'] },
             { input: { path: 'out.txt', text: 'once' } },
         );
-        await ctx.runUnsafelyOnHost('gate', () => {
+        await ctx.step('gate', () => {
             if (boom) throw new Error('boom');
             return 1;
         });
@@ -611,7 +539,7 @@ test('exec artifacts: re-running an identical step replays the stored artifact i
 
 test('ctx.step extract: a custom extractor bridges a non-frame, non-zero-exit process into a result', async () => {
     const deps = await artifactDeps();
-    defineWorkflow('bridge', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('bridge', async (ctx) =>
         ctx.step(
             'stock',
             {
@@ -649,7 +577,7 @@ test('ctx.step extract: a custom extractor bridges a non-frame, non-zero-exit pr
 
 test('ctx.step extract: mutating the extractor artifacts map does not corrupt the persisted record', async () => {
     const deps = await artifactDeps();
-    defineWorkflow('mutate', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('mutate', async (ctx) =>
         ctx.step(
             'stock',
             {
@@ -681,7 +609,7 @@ test('ctx.step extract: mutating the extractor artifacts map does not corrupt th
 
 test('ctx.step extract: without an extractor, the default frame decoder still fails that same process', async () => {
     const deps = await artifactDeps();
-    defineWorkflow('nobridge', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('nobridge', async (ctx) =>
         ctx.step(
             'stock',
             { runtime: 'node', module: exitWriter, outputs: ['out.json'] },
@@ -702,7 +630,7 @@ test('ctx.step extract: without an extractor, the default frame decoder still fa
 }, 20_000);
 
 test('ctx.step extract: an extractor that throws fails the step with its own error', async () => {
-    defineWorkflow('reject', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('reject', async (ctx) =>
         ctx.step(
             'run',
             {
@@ -723,7 +651,7 @@ test('ctx.step extract: an extractor that throws fails the step with its own err
 
 test('ctx.step extract: an extractor that throws leaves no orphan artifacts from its declared outputs', async () => {
     const deps = await artifactDeps();
-    defineWorkflow('reject-artifacts', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('reject-artifacts', async (ctx) =>
         ctx.step(
             'run',
             {
@@ -749,7 +677,7 @@ test('ctx.step extract: an extractor that throws leaves no orphan artifacts from
 }, 20_000);
 
 test('ctx.step extract: an async extractor is awaited, so its resolved value is the step result', async () => {
-    defineWorkflow('async-extract', { capabilities: ['host-exec'] }, async (ctx) =>
+    defineWorkflow('async-extract', async (ctx) =>
         ctx.step(
             'run',
             {

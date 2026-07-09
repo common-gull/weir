@@ -15,7 +15,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
+import { resolveExecEnv, withCapabilities } from './capabilities.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
 import { buildArgv, type ExtractInput, planOutputs, snapshotOutputs, stageInputs } from './exec/runtime.ts';
 import { runProcess } from './exec/spawn.ts';
@@ -104,17 +104,6 @@ export class ParkSignal extends Error {
 }
 export class DeterminismError extends Error {}
 export class CancelledError extends Error {}
-
-/** The error thrown when a container-step surface (`ctx.step` / `it.step`) is handed a closure
- *  instead of a spec: names the two supported paths (the exec runtime, or the host hatch) so the
- *  message tells the caller exactly where the code should move. */
-function closureStepError(surface: string, name: string, hostHatch: string): Error {
-    return new Error(
-        `${surface}("${name}", fn): closure steps no longer run in-process. Pass a StepSpec ` +
-            `{ runtime, module } to run it in the exec runtime, or use ${hostHatch} ` +
-            `(gated on 'host-exec') for host-touching work.`,
-    );
-}
 
 /** The default host-side extractor (#50): interpret a step's raw process output as a C1 output frame —
  *  the exact behavior every exec step had before `extract` became pluggable. A non-zero exit with no
@@ -514,13 +503,8 @@ function buildCtx(
     }
 
     const execStepImpl = (name: string, spec: StepSpec, opts: StepOpts, keyOverride?: string): Promise<unknown> => {
-        // A rung-1 exec step spawns an arbitrary module in a subprocess on the host with no
-        // isolation — the same unsandboxed host-code-execution privilege as runUnsafelyOnHost — so
-        // gate it on the same 'host-exec' capability. Like runUnsafelyOnHost, the gate runs before
-        // any ordinal/seq is consumed, so a denied call throws without touching replay state.
-        requireCapability('host-exec');
         // `keyOverride` carries a loop's per-iteration namespacing (`loop#L:i:name`) so a spec step
-        // inside `ctx.loop` keys identically to the closure `it.step` it replaces.
+        // inside `ctx.loop` keys identically to the closure `it.step` alongside it.
         const ord = bump(state.ordinals, keyOverride ?? name);
         const key = opts.key ?? keyOverride ?? `${name}#${ord}`;
         // A spec declaring outputs resolves to { result, artifacts }; otherwise the bare module result
@@ -532,16 +516,17 @@ function buildCtx(
         });
     };
 
-    // Shared by `ctx.step` and loop-scoped `it.step`: container-by-default dispatch where a spec
-    // routes to the exec runtime and a closure is rejected loudly (no silent in-process fallback),
-    // so host-touching work moves to the gated escape hatch named by `hostHatch`. The throw fires
-    // before any seq is consumed, so it never corrupts replay.
+    // Shared by `ctx.step` and loop-scoped `it.step`: `typeof` dispatch over the step body. A closure
+    // runs in-process on the host (the default surface for host-integration work); a StepSpec routes
+    // to the exec runtime as a transitional overload kept until `containerStep` lands. Both paths do
+    // identical ordinal/seq bookkeeping, so a spec and a closure key interchangeably under replay.
+    // `keyOverride` carries a loop's per-iteration namespacing (`loop#L:i:name`).
     const makeStepDispatch =
-        (surface: string, hostHatch: string, keyOverride?: (name: string) => string) =>
-        (name: string, arg2: ((s: StepCtx) => unknown) | StepSpec, opts: StepOpts = {}): Promise<unknown> => {
-            if (typeof arg2 === 'function') throw closureStepError(surface, name, hostHatch);
-            return execStepImpl(name, arg2, opts, keyOverride?.(name));
-        };
+        (keyOverride?: (name: string) => string) =>
+        (name: string, arg2: ((s: StepCtx) => unknown) | StepSpec, opts: StepOpts = {}): Promise<unknown> =>
+            typeof arg2 === 'function'
+                ? stepImpl(name, arg2, opts, keyOverride?.(name))
+                : execStepImpl(name, arg2, opts, keyOverride?.(name));
 
     const ctx: Ctx = {
         runId,
@@ -549,15 +534,7 @@ function buildCtx(
         input,
         capabilities: caps,
 
-        step: makeStepDispatch('ctx.step', 'ctx.runUnsafelyOnHost') as Ctx['step'],
-
-        // The host escape hatch: identical in-process execution to `step`, gated loudly on
-        // 'host-exec'. The gate runs before any seq is consumed, so a denied call throws without
-        // touching replay state.
-        runUnsafelyOnHost: (name, fn, opts) => {
-            requireCapability('host-exec');
-            return stepImpl(name, fn, opts);
-        },
+        step: makeStepDispatch() as Ctx['step'],
 
         loop: async <T>(opts: LoopOpts<T>, bodyFn: (it: LoopCtx) => T | Promise<T>): Promise<T> => {
             const loopId = state.loopOrd++;
@@ -568,15 +545,7 @@ function buildCtx(
                 const it: LoopCtx = {
                     index: i,
                     prev,
-                    step: makeStepDispatch(
-                        'it.step',
-                        'it.runUnsafelyOnHost',
-                        (name) => `${base}:${i}:${name}`,
-                    ) as LoopCtx['step'],
-                    runUnsafelyOnHost: (name, fn, o) => {
-                        requireCapability('host-exec');
-                        return stepImpl(name, fn, o, `${base}:${i}:${name}`);
-                    },
+                    step: makeStepDispatch((name) => `${base}:${i}:${name}`) as LoopCtx['step'],
                 };
                 result = await Promise.resolve(bodyFn(it));
                 prev = result;
@@ -587,11 +556,7 @@ function buildCtx(
         },
 
         map: async (items, fn, opts = {}) => {
-            // `fn` runs in-process on the host (each item wrapped in an in-process step), the same
-            // unsandboxed privilege as runUnsafelyOnHost — so gate `map` on 'host-exec' too. Without
-            // this, `map` would be a way to run host closures around the capability. The gate runs
-            // before any ordinal/seq is consumed, so a denied call throws without touching replay.
-            requireCapability('host-exec');
+            // `fn` runs in-process on the host, each item wrapped in an in-process step.
             const mapId = state.mapOrd++;
             const base = `map#${mapId}`;
             const conc = Math.max(1, opts.concurrency ?? 8);

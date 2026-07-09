@@ -83,16 +83,10 @@ export function unknownCapabilities(
 }
 
 // Built-in capabilities, each enforced via requireCapability() at its chokepoint(s): the CLI
-// adapters in src/tools for git/gh, and engine.ts's ctx.runUnsafelyOnHost + exec-step dispatch for
-// host-exec (both run unsandboxed host code).
+// adapters in src/tools for git/gh.
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
-defineCapability(
-    'host-exec',
-    'run a step on the host with full daemon privileges and no isolation — an in-process closure ' +
-        '(runUnsafelyOnHost) or a rung-1 exec-runtime subprocess',
-);
 // A conventional capability with no central chokepoint (there's no single place all outbound
 // traffic passes through). Seeded so it's a *known* capability, for a workflow or lib/ tool that
 // gates its own network calls — e.g. lib/slack.ts gates its fetch on its own 'slack' capability.
@@ -105,11 +99,10 @@ defineCapability('network', 'make arbitrary outbound network requests (self-gate
 // only the credential vars its declared capabilities name, plus a tiny operational baseline. A step
 // that declares no credential capability therefore sees none of the daemon's secrets. This is the
 // process runtime's only isolation lever; network-namespace isolation and secret mounts are Docker's
-// (C8). Note 'host-exec' — required to run any exec step — is deliberately absent from CAP_ENV: it
-// authorizes spawning host code, not inheriting the daemon's credentials.
+// (C8).
 
 /** Each capability → the daemon env vars it authorizes forwarding to a step's subprocess. A
- *  capability not listed here (host-exec, network) contributes no credentials of its own. */
+ *  capability not listed here (e.g. network) contributes no credentials of its own. */
 const CAP_ENV: Partial<Record<Capability, readonly string[]>> = {
     'gh-pr': ['GH_TOKEN', 'GITHUB_TOKEN'],
     'gh-comment': ['GH_TOKEN', 'GITHUB_TOKEN'],
