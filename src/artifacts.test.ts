@@ -3,7 +3,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getArtifact, putArtifact } from './artifacts.ts';
+import { artifactHash, artifactKind, getArtifact, hashFile, putArtifact } from './artifacts.ts';
 import { type DB, openDb } from './db.ts';
 
 let db: DB;
@@ -61,4 +61,24 @@ test('different content hashes to different keys', async () => {
 test('getArtifact throws for an unknown hash and a malformed one', () => {
     expect(() => getArtifact(dir, 'a'.repeat(64))).toThrow(/not found/);
     expect(() => getArtifact(dir, 'not-a-hash')).toThrow(/invalid/);
+});
+
+test('hashFile streams a multi-chunk file to the same hash as buffering it whole', async () => {
+    // Larger than a single stream chunk, so a correct stream hash must fold every chunk in — the
+    // property that lets a large blob hash without being read wholly into memory.
+    const bytes = new Uint8Array(3 * 1024 * 1024);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i & 0xff;
+    const file = join(dir, 'big.bin');
+    await writeFile(file, bytes);
+    expect(await hashFile(file)).toBe(artifactHash(bytes));
+});
+
+test('records the artifact kind and artifactKind reads it back', async () => {
+    const fileHash = await putArtifact(db, dir, new TextEncoder().encode('plain'));
+    expect(artifactKind(db, fileHash)).toBe('file');
+
+    const dirHash = await putArtifact(db, dir, new TextEncoder().encode('a tar blob'), 'dir');
+    expect(artifactKind(db, dirHash)).toBe('dir');
+
+    expect(() => artifactKind(db, 'b'.repeat(64))).toThrow(/not found/);
 });

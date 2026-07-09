@@ -1,8 +1,11 @@
 import { expect, test } from 'bun:test';
-import { isAbsolute, resolve } from 'node:path';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { type DB, openDb } from '../db.ts';
 import type { LogFrame } from './protocol.ts';
-import { buildArgv, type LocalStepSpec } from './runtime.ts';
+import { buildArgv, type LocalStepSpec, planOutputs, snapshotOutputs, stageInputs } from './runtime.ts';
 import { runProtocol } from './spawn.ts';
 
 const fixture = (name: string) => fileURLToPath(new URL(`./testdata/${name}`, import.meta.url));
@@ -156,3 +159,84 @@ pyTest(
     },
     15_000,
 );
+
+// ---- scratch staging (#C6): directory artifacts + streaming hashes ----
+
+async function withStaging(fn: (env: { db: DB; store: string; a: string; b: string }) => Promise<void>): Promise<void> {
+    const db = openDb(':memory:');
+    const store = await mkdtemp(join(tmpdir(), 'weir-store-'));
+    const a = await mkdtemp(join(tmpdir(), 'weir-scratch-a-'));
+    const b = await mkdtemp(join(tmpdir(), 'weir-scratch-b-'));
+    try {
+        await fn({ db, store, a, b });
+    } finally {
+        db.close();
+        await Promise.all([a, b, store].map((d) => rm(d, { recursive: true, force: true })));
+    }
+}
+
+test('a directory output round-trips through the store with a stable content hash', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        await mkdir(join(a, 'repo/sub'), { recursive: true });
+        await writeFile(join(a, 'repo/a.txt'), 'alpha');
+        await writeFile(join(a, 'repo/sub/b.txt'), 'beta');
+
+        const map = await snapshotOutputs(db, store, a, ['repo']);
+        expect(map.repo).toMatch(/^[0-9a-f]{64}$/);
+
+        // Deterministic archive: the same tree content-addresses to the same hash (so it dedups).
+        const again = await snapshotOutputs(db, store, a, ['repo']);
+        expect(again.repo).toBe(map.repo);
+
+        // Unpacking into a fresh scratch reproduces the tree byte-for-byte.
+        await stageInputs(db, store, b, [{ hash: map.repo ?? '', path: 'repo' }]);
+        expect(await readFile(join(b, 'repo/a.txt'), 'utf8')).toBe('alpha');
+        expect(await readFile(join(b, 'repo/sub/b.txt'), 'utf8')).toBe('beta');
+    });
+});
+
+test('a file output round-trips alongside directory artifacts', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        await writeFile(join(a, 'data.bin'), 'plain bytes');
+        const map = await snapshotOutputs(db, store, a, ['data.bin']);
+
+        await stageInputs(db, store, b, [{ hash: map['data.bin'] ?? '', path: 'copy.bin' }]);
+        expect(await readFile(join(b, 'copy.bin'), 'utf8')).toBe('plain bytes');
+    });
+});
+
+test('a rejected plan (commit never called) leaks no temp archive in the scratch dir', async () => {
+    await withStaging(async ({ db, store, a }) => {
+        await mkdir(join(a, 'tree'), { recursive: true });
+        await writeFile(join(a, 'tree/f.txt'), 'x');
+        // plan without commit models an extractor rejecting the run: the temp tar rides inside the
+        // scratch dir, which the engine tears down, so nothing is orphaned in the store.
+        const { map } = await planOutputs(db, store, a, ['tree']);
+        expect(map.tree).toMatch(/^[0-9a-f]{64}$/);
+        expect(db.query(`SELECT COUNT(*) AS c FROM artifacts`).get()).toEqual({ c: 0 });
+    });
+});
+
+test('a whole-scratch output does not capture the transient tar written from it', async () => {
+    await withStaging(async ({ db, store, a }) => {
+        await writeFile(join(a, 'only.txt'), 'content');
+        // Archiving '.' writes its temp tar into the same dir; the exclude must keep it out, so the
+        // hash stays deterministic rather than folding in a half-written archive.
+        const first = await snapshotOutputs(db, store, a, ['.']);
+        const second = await snapshotOutputs(db, store, a, ['.']);
+        expect(second['.']).toBe(first['.']);
+    });
+});
+
+test('staging still rejects a directory artifact whose declared path escapes the scratch dir', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        await mkdir(join(a, 'tree'), { recursive: true });
+        await writeFile(join(a, 'tree/f.txt'), 'x');
+        const map = await snapshotOutputs(db, store, a, ['tree']);
+
+        await expect(stageInputs(db, store, b, [{ hash: map.tree ?? '', path: '../escape' }])).rejects.toThrow(
+            /escapes the scratch dir/,
+        );
+        await expect(snapshotOutputs(db, store, a, ['../escape'])).rejects.toThrow(/escapes the scratch dir/);
+    });
+});
