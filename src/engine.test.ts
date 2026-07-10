@@ -1,8 +1,9 @@
 import { $ } from 'bun';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { getArtifact } from './artifacts.ts';
 import { openDb, type DB } from './db.ts';
 import { clearRegistry, defineWorkflow, executeRun, type RunDeps } from './engine.ts';
 import { approveRun, createRun, retryRun } from './runs.ts';
@@ -483,4 +484,67 @@ dockerTest(
         expect(n.n).toBe(0);
     },
     30_000,
+);
+
+dockerTest(
+    'containerStep: declared outputs are content-addressed into the store and recorded in the memo',
+    async () => {
+        // The success store-commit path for the docker runtime, end-to-end through the engine: the
+        // container writes a declared output into its /weir scratch and emits a C1 frame; the engine
+        // snapshots that output into the store and records the path -> hash map in the memo.
+        try {
+            await $`docker pull busybox:latest`.quiet();
+        } catch {
+            return;
+        }
+        const deps = await containerDeps();
+        const cmd = [
+            '/bin/sh',
+            '-c',
+            'printf hello-artifact > /weir/out.txt; printf %s \'{"ok":true,"result":{"wrote":"out.txt"}}\'',
+        ];
+        defineWorkflow('produce', {}, (ctx) =>
+            ctx.containerStep('make', { image: 'busybox:latest', cmd, outputs: ['out.txt'] }),
+        );
+        const id = createRun(db, 'produce');
+        expect(await executeRun(db, id, deps)).toBe('completed');
+
+        // The path -> hash map is recorded in the step's memo row (the additive `artifacts` column).
+        const step = db.query(`SELECT artifacts FROM steps WHERE run_id = ?`).get(id) as { artifacts: string };
+        const map = JSON.parse(step.artifacts) as Record<string, string>;
+        const hash = map['out.txt'] ?? '';
+        expect(hash).toMatch(/^[0-9a-f]{64}$/);
+        // The bytes live in the store under that hash, and the workflow saw { result, artifacts }.
+        expect(await readFile(getArtifact(deps.storeDir ?? '', hash), 'utf8')).toBe('hello-artifact');
+        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+        expect(JSON.parse(run.result)).toEqual({ result: { wrote: 'out.txt' }, artifacts: { 'out.txt': hash } });
+    },
+    60_000,
+);
+
+dockerTest(
+    'containerStep: a failing step declaring outputs orphans no artifacts',
+    async () => {
+        // decodeFrameResult runs before snapshotOutputs, so a non-zero exit with no frame fails the step
+        // before the store is ever touched — the docker-runtime analogue of the exec path's
+        // deferred-commit guarantee. The output is written but the run rejects, so nothing is committed.
+        try {
+            await $`docker pull busybox:latest`.quiet();
+        } catch {
+            return;
+        }
+        const deps = await containerDeps();
+        const cmd = ['/bin/sh', '-c', 'printf wrote-but-rejected > /weir/out.txt; exit 1'];
+        defineWorkflow('reject', {}, (ctx) =>
+            ctx.containerStep('make', { image: 'busybox:latest', cmd, outputs: ['out.txt'] }),
+        );
+        const id = createRun(db, 'reject');
+        expect(await executeRun(db, id, deps)).toBe('failed');
+        // A failed step isn't memoized, and its declared output was never committed to the store.
+        const steps = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
+        expect(steps.n).toBe(0);
+        const artifacts = db.query(`SELECT COUNT(*) AS n FROM artifacts`).get() as { n: number };
+        expect(artifacts.n).toBe(0);
+    },
+    60_000,
 );
