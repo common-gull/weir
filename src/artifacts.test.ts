@@ -3,7 +3,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getArtifact, putArtifact } from './artifacts.ts';
+import { artifactHash, artifactKind, getArtifact, hashFile, putArtifact } from './artifacts.ts';
 import { type DB, openDb } from './db.ts';
 
 let db: DB;
@@ -41,6 +41,25 @@ test('stores a file path by reading its bytes', async () => {
     expect(await readFile(getArtifact(dir, hash), 'utf8')).toBe('from a file');
 });
 
+test('a path source lands bytes that actually hash to the key it is stored under', async () => {
+    // The content-addressing invariant: the blob under `hash` must itself hash to `hash`. Hashing the
+    // source and copying it in separate passes could break this if the source changed between them.
+    const file = join(dir, 'input.txt');
+    await writeFile(file, 'content-addressed');
+    const hash = await putArtifact(db, dir, file);
+    expect(await hashFile(getArtifact(dir, hash))).toBe(hash);
+});
+
+test('a repeated path source dedups to one file and one row with no leftover temp', async () => {
+    const file = join(dir, 'input.txt');
+    await writeFile(file, 'same on disk');
+    const first = await putArtifact(db, dir, file);
+    const second = await putArtifact(db, dir, file);
+    expect(second).toBe(first);
+    expect(readdirSync(dir).sort()).toEqual(['input.txt', first].sort());
+    expect(db.query(`SELECT COUNT(*) AS c FROM artifacts`).get()).toEqual({ c: 1 });
+});
+
 test('identical content dedups to one key, one file, one row', async () => {
     const first = await putArtifact(db, dir, new TextEncoder().encode('same'));
     const second = await putArtifact(db, dir, new TextEncoder().encode('same'));
@@ -61,4 +80,24 @@ test('different content hashes to different keys', async () => {
 test('getArtifact throws for an unknown hash and a malformed one', () => {
     expect(() => getArtifact(dir, 'a'.repeat(64))).toThrow(/not found/);
     expect(() => getArtifact(dir, 'not-a-hash')).toThrow(/invalid/);
+});
+
+test('hashFile streams a multi-chunk file to the same hash as buffering it whole', async () => {
+    // Larger than a single stream chunk, so a correct stream hash must fold every chunk in — the
+    // property that lets a large blob hash without being read wholly into memory.
+    const bytes = new Uint8Array(3 * 1024 * 1024);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i & 0xff;
+    const file = join(dir, 'big.bin');
+    await writeFile(file, bytes);
+    expect(await hashFile(file)).toBe(artifactHash(bytes));
+});
+
+test('records the artifact kind and artifactKind reads it back', async () => {
+    const fileHash = await putArtifact(db, dir, new TextEncoder().encode('plain'));
+    expect(artifactKind(db, fileHash)).toBe('file');
+
+    const dirHash = await putArtifact(db, dir, new TextEncoder().encode('a tar blob'), 'dir');
+    expect(artifactKind(db, dirHash)).toBe('dir');
+
+    expect(() => artifactKind(db, 'b'.repeat(64))).toThrow(/not found/);
 });

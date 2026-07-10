@@ -456,7 +456,7 @@ function buildCtx(
         const env = resolveExecEnv();
         try {
             await mkdir(scratch, { recursive: true });
-            await stageInputs(storeDir, scratch, spec.inputs ?? []);
+            await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
             const raw = await runProcess({
                 argv: buildDockerArgv(spec, { scratch, env, mounts: dockerCapabilityMounts(), image }),
                 input: opts.input,
