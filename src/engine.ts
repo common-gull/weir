@@ -438,7 +438,7 @@ function buildCtx(
             if (inputs.length > 0 || outputs.length > 0) {
                 scratch = join(deps.scratchDir ?? join(process.cwd(), '.weir', 'scratch'), runId, String(seq));
                 await mkdir(scratch, { recursive: true });
-                await stageInputs(storeDir, scratch, inputs);
+                await stageInputs(db, storeDir, scratch, inputs);
             }
             const raw = await runProcess({
                 argv: buildArgv(spec),

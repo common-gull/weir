@@ -1,8 +1,22 @@
+import { $ } from 'bun';
 import { expect, test } from 'bun:test';
-import { isAbsolute, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { putArtifact } from '../artifacts.ts';
+import { type DB, openDb } from '../db.ts';
 import type { LogFrame } from './protocol.ts';
-import { buildArgv, buildDockerArgv, type DockerStepSpec, type LocalStepSpec } from './runtime.ts';
+import {
+    buildArgv,
+    buildDockerArgv,
+    type DockerStepSpec,
+    type LocalStepSpec,
+    planOutputs,
+    snapshotOutputs,
+    stageInputs,
+} from './runtime.ts';
 import { runProtocol } from './spawn.ts';
 
 const fixture = (name: string) => fileURLToPath(new URL(`./testdata/${name}`, import.meta.url));
@@ -240,3 +254,156 @@ pyTest(
     },
     15_000,
 );
+
+// ---- scratch staging (#C6): directory artifacts + streaming hashes ----
+
+async function withStaging(fn: (env: { db: DB; store: string; a: string; b: string }) => Promise<void>): Promise<void> {
+    const db = openDb(':memory:');
+    const store = await mkdtemp(join(tmpdir(), 'weir-store-'));
+    const a = await mkdtemp(join(tmpdir(), 'weir-scratch-a-'));
+    const b = await mkdtemp(join(tmpdir(), 'weir-scratch-b-'));
+    try {
+        await fn({ db, store, a, b });
+    } finally {
+        db.close();
+        await Promise.all([a, b, store].map((d) => rm(d, { recursive: true, force: true })));
+    }
+}
+
+/** A directory outside every scratch dir, standing in for a symlink escape's target. */
+async function withOutsideDir(fn: (outside: string) => Promise<void>): Promise<void> {
+    const outside = await mkdtemp(join(tmpdir(), 'weir-outside-'));
+    try {
+        await fn(outside);
+    } finally {
+        await rm(outside, { recursive: true, force: true });
+    }
+}
+
+test('a directory output round-trips through the store with a stable content hash', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        await mkdir(join(a, 'repo/sub'), { recursive: true });
+        await writeFile(join(a, 'repo/a.txt'), 'alpha');
+        await writeFile(join(a, 'repo/sub/b.txt'), 'beta');
+
+        const map = await snapshotOutputs(db, store, a, ['repo']);
+        expect(map.repo).toMatch(/^[0-9a-f]{64}$/);
+
+        // Deterministic archive: the same tree content-addresses to the same hash (so it dedups).
+        const again = await snapshotOutputs(db, store, a, ['repo']);
+        expect(again.repo).toBe(map.repo);
+
+        // Unpacking into a fresh scratch reproduces the tree byte-for-byte.
+        await stageInputs(db, store, b, [{ hash: map.repo ?? '', path: 'repo' }]);
+        expect(await readFile(join(b, 'repo/a.txt'), 'utf8')).toBe('alpha');
+        expect(await readFile(join(b, 'repo/sub/b.txt'), 'utf8')).toBe('beta');
+    });
+});
+
+test('a file output round-trips alongside directory artifacts', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        await writeFile(join(a, 'data.bin'), 'plain bytes');
+        const map = await snapshotOutputs(db, store, a, ['data.bin']);
+
+        await stageInputs(db, store, b, [{ hash: map['data.bin'] ?? '', path: 'copy.bin' }]);
+        expect(await readFile(join(b, 'copy.bin'), 'utf8')).toBe('plain bytes');
+    });
+});
+
+test('a rejected plan (commit never called) leaks no temp archive in the scratch dir', async () => {
+    await withStaging(async ({ db, store, a }) => {
+        await mkdir(join(a, 'tree'), { recursive: true });
+        await writeFile(join(a, 'tree/f.txt'), 'x');
+        // plan without commit models an extractor rejecting the run: the temp tar rides inside the
+        // scratch dir, which the engine tears down, so nothing is orphaned in the store.
+        const { map } = await planOutputs(db, store, a, ['tree']);
+        expect(map.tree).toMatch(/^[0-9a-f]{64}$/);
+        expect(db.query(`SELECT COUNT(*) AS c FROM artifacts`).get()).toEqual({ c: 0 });
+    });
+});
+
+test('a whole-scratch output does not capture the transient tar written from it', async () => {
+    await withStaging(async ({ db, store, a }) => {
+        await writeFile(join(a, 'only.txt'), 'content');
+        // Archiving '.' writes its temp tar into the same dir; the exclude must keep it out, so the
+        // hash stays deterministic rather than folding in a half-written archive.
+        const first = await snapshotOutputs(db, store, a, ['.']);
+        const second = await snapshotOutputs(db, store, a, ['.']);
+        expect(second['.']).toBe(first['.']);
+    });
+});
+
+test('staging still rejects a directory artifact whose declared path escapes the scratch dir', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        await mkdir(join(a, 'tree'), { recursive: true });
+        await writeFile(join(a, 'tree/f.txt'), 'x');
+        const map = await snapshotOutputs(db, store, a, ['tree']);
+
+        await expect(stageInputs(db, store, b, [{ hash: map.tree ?? '', path: '../escape' }])).rejects.toThrow(
+            /escapes the scratch dir/,
+        );
+        await expect(snapshotOutputs(db, store, a, ['../escape'])).rejects.toThrow(/escapes the scratch dir/);
+    });
+});
+
+test('archiving a directory output containing a symlink is refused, so no link enters the store', async () => {
+    await withOutsideDir(async (outside) => {
+        await withStaging(async ({ db, store, a }) => {
+            await writeFile(join(outside, 'secret'), 'top secret');
+            await mkdir(join(a, 'tree'), { recursive: true });
+            await writeFile(join(a, 'tree/real.txt'), 'ok');
+            await symlink(outside, join(a, 'tree/escape'));
+
+            await expect(snapshotOutputs(db, store, a, ['tree'])).rejects.toThrow(/symlink/);
+            // Nothing was committed: the tree never became a stage-in-able blob.
+            expect(db.query(`SELECT COUNT(*) AS c FROM artifacts`).get()).toEqual({ c: 0 });
+        });
+    });
+});
+
+test('a declared output that is itself a symlink to a directory is refused (no dereference on archive)', async () => {
+    await withOutsideDir(async (outside) => {
+        await withStaging(async ({ db, store, a }) => {
+            await writeFile(join(outside, 'secret'), 'top secret');
+            await symlink(outside, join(a, 'linkdir'));
+            await expect(snapshotOutputs(db, store, a, ['linkdir'])).rejects.toThrow(/symlink/);
+        });
+    });
+});
+
+test('staging refuses a directory blob carrying a symlink, closing the escape on unpack', async () => {
+    await withOutsideDir(async (outside) => {
+        await withStaging(async ({ db, store, a, b }) => {
+            await writeFile(join(outside, 'secret'), 'top secret');
+            // A 'dir' blob the guarded archive path would never produce: a raw tar carrying a live
+            // symlink to a dir outside every scratch. Modelling a blob that reached the store elsewise.
+            await mkdir(join(a, 'tree'), { recursive: true });
+            await symlink(outside, join(a, 'tree/escape'));
+            const tar = join(a, 'evil.tar');
+            await $`tar -cf ${tar} -C ${join(a, 'tree')} .`.quiet();
+            const hash = await putArtifact(db, store, tar, 'dir');
+
+            await expect(stageInputs(db, store, b, [{ hash, path: 'tree' }])).rejects.toThrow(/symlink/);
+            // The link never materialized under the scratch dir, so the outside secret stays unreachable.
+            expect(existsSync(join(b, 'tree/escape'))).toBe(false);
+            expect(await readFile(join(outside, 'secret'), 'utf8')).toBe('top secret');
+        });
+    });
+});
+
+test('staging refuses a directory blob whose member escapes via a traversing path', async () => {
+    await withStaging(async ({ db, store, a, b }) => {
+        // A 'dir' blob the guarded archive path would never produce: a hand-built tar whose member name
+        // climbs out of the destination with `..`. `-P` on create keeps the `..` in the stored name;
+        // system tar doesn't portably strip it on extract, so the guard must reject it from the listing.
+        await mkdir(join(a, 'payload'), { recursive: true });
+        await writeFile(join(a, 'payload/loot.txt'), 'pwned');
+        const tar = join(a, 'slip.tar');
+        await $`tar -P -cf ${tar} -C ${join(a, 'payload')} ${'../payload/loot.txt'}`.quiet();
+        const hash = await putArtifact(db, store, tar, 'dir');
+
+        await expect(stageInputs(db, store, b, [{ hash, path: 'tree' }])).rejects.toThrow(/escapes the scratch dir/);
+        // Nothing was extracted, so no member climbed out of the destination onto the host.
+        expect(existsSync(join(b, 'tree'))).toBe(false);
+    });
+});

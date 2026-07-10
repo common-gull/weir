@@ -114,10 +114,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS ix_events_run ON events(run_id, id);
 
 -- Content-addressed artifact store metadata. Bytes too big for the JSON memo live on disk under
--- the store dir keyed by their sha256; this row records size + when first stored. See artifacts.ts.
+-- the store dir keyed by their sha256; this row records size, kind ('file' | 'dir', where a 'dir'
+-- blob is a directory tree archived as one tar) + when first stored. See artifacts.ts.
 CREATE TABLE IF NOT EXISTS artifacts (
   hash       TEXT PRIMARY KEY,
   size       INTEGER NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'file',
   created_at INTEGER NOT NULL
 );
 `;
@@ -142,6 +144,7 @@ export function openDb(path: string): DB {
 function migrate(db: DB): void {
     addColumn(db, 'steps', 'artifacts', 'TEXT');
     addColumn(db, 'steps', 'image_digest', 'TEXT');
+    addColumn(db, 'artifacts', 'kind', "TEXT NOT NULL DEFAULT 'file'");
 }
 
 /** Add `column` to `table` if the live schema lacks it. Names are trusted literals, not input. */
