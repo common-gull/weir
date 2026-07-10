@@ -55,6 +55,7 @@ export interface PullRequest {
     url: string;
     headRefName: string;
     headRefOid?: string;
+    baseRefName?: string;
     isDraft: boolean;
     reviewDecision: string | null;
     updatedAt: string;
@@ -111,7 +112,7 @@ export async function listOpenPrs(
 ): Promise<PullRequest[]> {
     const limit = opts.limit ?? 100;
     if (limit < 1) return [];
-    const fields = 'number,title,url,headRefName,headRefOid,isDraft,reviewDecision,updatedAt,author';
+    const fields = 'number,title,url,headRefName,headRefOid,baseRefName,isDraft,reviewDecision,updatedAt,author';
     const args = ['pr', 'list', '--repo', repo, '--state', 'open', '--json', fields, '--limit', String(limit)];
     if (opts.author) args.push('--author', opts.author);
     const out = await $`gh ${args}`.text();

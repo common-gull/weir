@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "lint:fix": "biome check --write",
+    "images:build": "docker build -t weir-node -f images/weir-node/Dockerfile . && docker build -t weir-python -f images/weir-python/Dockerfile .",
     "build:ui": "bun run --filter='weir-ui' build",
     "check:ui": "bun run --filter='weir-ui' check",
     "check": "bun run lint && bun run typecheck && bun run test && bun run check:ui"
