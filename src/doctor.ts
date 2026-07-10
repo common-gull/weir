@@ -14,12 +14,15 @@ export interface DoctorResult {
     lines: string[];
 }
 
-const DEFAULT_TOOLS: ToolCheck[] = [
+export const DEFAULT_TOOLS: ToolCheck[] = [
     { cmd: 'claude', versionArg: '--version', required: true },
     { cmd: 'git', versionArg: '--version', required: true },
     { cmd: 'gh', versionArg: '--version', required: false },
     { cmd: 'node', versionArg: '--version', required: false },
     { cmd: 'tar', versionArg: '--version', required: false },
+    // Optional: the container rung (#C8) needs it, but a host-only workflow set doesn't, so its
+    // absence is reported, not fatal.
+    { cmd: 'docker', versionArg: '--version', required: false },
 ];
 
 export async function doctor(tools: ToolCheck[] = DEFAULT_TOOLS): Promise<DoctorResult> {
