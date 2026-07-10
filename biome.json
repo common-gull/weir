@@ -7,7 +7,7 @@
     },
     "files": {
         "ignoreUnknown": true,
-        "includes": ["src/**", "workflows/**", "lib/**", "ui/src/**"]
+        "includes": ["src/**", "workflows/**", "ui/src/**"]
     },
     "html": {
         "experimentalFullSupportEnabled": true

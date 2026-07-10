@@ -34,7 +34,7 @@ async function cmdStart(cfg: WeirConfig): Promise<void> {
     console.log(`loaded ${files} workflow file(s) → ${allWorkflows().length} workflow(s)`);
     for (const u of unknownCapabilities(allWorkflows())) {
         console.warn(
-            `⚠ workflow "${u.workflow}" declares undeclared capability "${u.capability}" — still enforced; defineCapability() it to document (see lib/README.md)`,
+            `⚠ workflow "${u.workflow}" declares undeclared capability "${u.capability}" — still enforced; defineCapability() it to document (see AGENTS.md)`,
         );
     }
 
@@ -196,7 +196,7 @@ function cmdList(cfg: WeirConfig): Promise<void> {
             console.log(`${wf.name}${sched}${caps}`);
         }
         if (unknownCapabilities(allWorkflows()).length) {
-            console.log('\n? = capability not declared via defineCapability() — see lib/README.md');
+            console.log('\n? = capability not declared via defineCapability() — see AGENTS.md');
         }
     });
 }
@@ -238,8 +238,8 @@ async function main() {
         case 'doctor': {
             const r = await doctor();
             console.log(r.lines.join('\n'));
-            // Capability validation needs the registry populated, so load workflows (and their lib/
-            // imports) first, then flag any declared-but-undeclared capabilities.
+            // Capability validation needs the registry populated, so load workflows (and their
+            // helper imports) first, then flag any declared-but-undeclared capabilities.
             await loadWorkflows(cfg.workflowsDir);
             const unknown = unknownCapabilities(allWorkflows());
             if (unknown.length) {

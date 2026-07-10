@@ -61,12 +61,13 @@ balloons the hand-written stylesheet). `ui` is a Bun workspace, so root scripts 
 ## Privacy — do not leak local or internal details
 
 The user's real workflows and shared code are personal and gitignored (`workflows/*` except
-`example.ts` and its step modules under `workflows/steps/`, `lib/*` except `README.md`, plus `*.db`,
-`.weir/`, `.env`). Treat their contents as private.
+`example.ts` and its step modules under `workflows/steps/`, plus `*.db`, `.weir/`, `.env`). Shared
+workflow helpers live under `workflows/common/` and are covered by that same `workflows/*` rule.
+Treat their contents as private.
 
 - Never commit or track personal files: keep changes to tracked, generic code (`src/`, `ui/`,
-  `workflows/example.ts`, `workflows/steps/`, docs). Do not add real workflows, `lib/` modules,
-  databases, or secrets.
+  `workflows/example.ts`, `workflows/steps/`, docs). Do not add real workflows, shared workflow
+  helpers, databases, or secrets.
 - Never expose internal specifics — private workflow names/logic, gitignored file contents, local
   paths, host details, credentials — in **commit messages, PR titles/descriptions, or issues**.
   Describe changes in terms of the public, tracked code only.
@@ -77,9 +78,45 @@ The user's real workflows and shared code are personal and gitignored (`workflow
   `capabilities.ts`, `api/server.ts`, `cli.ts`.
 - `src/tools/` — generic primitives usable by workflows (`git`, `gh`, `claude`, `fs`, `notify`, …).
 - `workflows/` — workflow definitions (only `example.ts`, its test, and the exec-step modules under
-  `workflows/steps/` are tracked).
-- `lib/` — shared helpers/modules for workflows (only `README.md` is tracked).
+  `workflows/steps/` are tracked). Each workflow's entrypoint is a top-level `*.ts`; its own helpers
+  live in a sibling folder (e.g. `workflows/<name>/`), and helpers shared across workflows live in
+  `workflows/common/`. The loader scans only top-level `workflows/*.ts`, so neither subfolder is
+  loaded as a workflow.
 - `ui/` — SvelteKit web UI.
 
 Outward actions are gated by capabilities (`src/capabilities.ts`); declare new ones with
 `defineCapability` rather than bypassing the gate.
+
+## Workflow helpers & custom tools
+
+Three tiers, most-shared to least:
+
+| Where | What |
+| --- | --- |
+| `src/tools/` | Engine-shipped primitives (`gh`, `ghGraphql`, `git`, `runClaude`, …). weir owns these — don't edit them to add a workflow feature. |
+| `workflows/common/` | Your reusable helpers/tools, composed from those primitives, shared across workflows. |
+| a workflow's own folder / inline | Logic used by exactly one workflow — inline in its entrypoint, or split into a sibling `workflows/<name>/` folder. |
+
+Rule of thumb: **write it inline first; move it to the workflow's own folder when the entrypoint
+gets big, and to `workflows/common/` once a second workflow needs it.**
+
+A **custom tool** that performs an outward action declares a capability and gates on it — see
+`workflows/common/slack.ts`:
+
+```ts
+import { defineCapability, requireCapability } from '../../src/capabilities.ts';
+
+defineCapability('slack', 'post messages to Slack'); // first-class: known to doctor/list/API
+export async function slackPost(text: string) {
+  requireCapability('slack');                        // gate the outward action
+  await fetch(process.env.SLACK_WEBHOOK_URL, { method: 'POST', body: JSON.stringify({ text }) });
+}
+```
+
+A custom capability works even unregistered (the `Capability` type has a `(string & {})` member),
+but `defineCapability` makes it first-class: validated by `weir doctor`, shown by `weir list`, and
+listed at `GET /api/capabilities`.
+
+**Reload caveat:** `weir reload` only cache-busts top-level `workflows/*.ts`. Edits to helpers
+(`workflows/common/`, a workflow's subfolder) or `src/` need a daemon **restart** — Bun caches
+modules by resolved path. Iterate with `bun test` / `weir run <wf>`, which start a fresh process.
