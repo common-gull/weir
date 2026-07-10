@@ -15,9 +15,18 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { resolveExecEnv, withCapabilities } from './capabilities.ts';
+import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
+import { pinnedImageRef, resolveImageDigest } from './exec/docker.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
-import { buildArgv, type ExtractInput, planOutputs, snapshotOutputs, stageInputs } from './exec/runtime.ts';
+import {
+    buildDockerArgv,
+    dockerCapabilityMounts,
+    type DockerStepSpec,
+    dockerImageRef,
+    type ExtractInput,
+    snapshotOutputs,
+    stageInputs,
+} from './exec/runtime.ts';
 import { runProcess } from './exec/spawn.ts';
 import {
     SkipSignal,
@@ -31,7 +40,6 @@ import {
     type StepKind,
     type StepOpts,
     type StepRow,
-    type StepSpec,
     type WorkflowOpts,
 } from './types.ts';
 
@@ -105,10 +113,9 @@ export class ParkSignal extends Error {
 export class DeterminismError extends Error {}
 export class CancelledError extends Error {}
 
-/** The default host-side extractor (#50): interpret a step's raw process output as a C1 output frame —
- *  the exact behavior every exec step had before `extract` became pluggable. A non-zero exit with no
- *  frame, a malformed frame, or an `{ ok:false }` frame each fail the step; an `{ ok:true }` frame
- *  yields its result. An author targeting a non-conforming image overrides it with `spec.extract`. */
+/** Interpret a container step's raw process output as a C1 output frame — the only way a
+ *  `ctx.containerStep` result is decoded. A non-zero exit with no frame, a malformed frame, or an
+ *  `{ ok:false }` frame each fail the step; an `{ ok:true }` frame yields its result. */
 function decodeFrameResult(raw: ExtractInput): unknown {
     const frame = decodeProcessOutput(raw.exitCode, raw.stdout);
     if (!frame.ok) throw new Error(frame.error);
@@ -155,10 +162,11 @@ function writeMemo(
     result: unknown,
     childRunId?: string | null,
     artifacts?: StepArtifacts | null,
+    imageDigest?: string | null,
 ): void {
     db.query(
-        `INSERT INTO steps (run_id, seq, key, name, kind, status, result, error, child_run_id, artifacts, created_at)
-     VALUES (?, ?, ?, ?, ?, 'completed', ?, NULL, ?, ?, ?)`,
+        `INSERT INTO steps (run_id, seq, key, name, kind, status, result, error, child_run_id, artifacts, image_digest, created_at)
+     VALUES (?, ?, ?, ?, ?, 'completed', ?, NULL, ?, ?, ?, ?)`,
     ).run(
         runId,
         seq,
@@ -168,6 +176,7 @@ function writeMemo(
         toJson(result),
         childRunId ?? null,
         artifacts ? toJson(artifacts) : null,
+        imageDigest ?? null,
         Date.now(),
     );
 }
@@ -290,7 +299,9 @@ function buildCtx(
         kind: StepKind,
         name: string,
         key: string,
-        produce: (seq: number) => Promise<{ value: T; childRunId?: string; artifacts?: StepArtifacts }>,
+        produce: (
+            seq: number,
+        ) => Promise<{ value: T; childRunId?: string; artifacts?: StepArtifacts; imageDigest?: string }>,
     ): Promise<T> {
         if (signal.aborted) throw new CancelledError('cancelled');
         const seq = state.seq++;
@@ -304,9 +315,9 @@ function buildCtx(
             }
             return fromJson<T>(hit.result) as T;
         }
-        const { value, childRunId, artifacts } = await produce(seq);
+        const { value, childRunId, artifacts, imageDigest } = await produce(seq);
         assertSerializable(value, key);
-        writeMemo(db, runId, seq, key, name, kind, value, childRunId, artifacts);
+        writeMemo(db, runId, seq, key, name, kind, value, childRunId, artifacts, imageDigest);
         return value;
     }
 
@@ -417,116 +428,101 @@ function buildCtx(
         }));
     };
 
-    // Exec-runtime step (rung-1): run the module in a subprocess (C2) via a runtime-specific argv
-    // (C3) rather than in-process on the host. Streamed log lines surface as step.log events like the
-    // in-process host step's log channel. When the spec declares inputs/outputs the step runs in an isolated
-    // scratch dir (#C6): declared input artifacts are staged in from the store beforehand and declared
-    // outputs snapshotted back into it afterward, their `path -> hash` map returned alongside the result.
-    // The step's raw output is normalized by the host-side extractor (#50) — `spec.extract`, defaulting
-    // to the frame decoder — which returns the result or throws to fail the step. The scratch dir is
-    // torn down once outputs are safely content-addressed.
-    async function runExecStep(
+    // Container step (rung-2): run the spec as a digest-pinned `docker run` child on the same spawn
+    // seam as a host step, streaming its log lines to step.log like any step. The image is resolved to
+    // its content digest UP FRONT — an unreachable daemon or an image with no local repo digest throws
+    // here and fails the step, with no host fallback — and that digest threads into the memo as the
+    // step's replay identity. A per-step scratch dir is ALWAYS created and bind-mounted at /weir (any
+    // declared inputs staged in, declared outputs snapshotted back), the env is the capability-scoped
+    // resolveExecEnv (#C7) — forwarded by name and used as the docker CLI's own env — and ambient
+    // capability mounts (dockerCapabilityMounts) ride along. `network: true` trades the default egress
+    // lock for docker's bridge and so requires the `network` capability, gated here in dispatch so
+    // buildDockerArgv stays a pure argv function. The scratch dir is torn down once outputs are stored.
+    async function runContainerStep(
         seq: number,
-        spec: StepSpec,
+        spec: DockerStepSpec,
         opts: StepOpts,
-    ): Promise<{ result: unknown; artifacts: StepArtifacts }> {
-        const inputs = spec.inputs ?? [];
+    ): Promise<{ result: unknown; artifacts: StepArtifacts; imageDigest: string }> {
+        if (spec.network) requireCapability('network');
+        const ref = dockerImageRef(spec);
+        const imageDigest = await resolveImageDigest(ref);
+        const image = pinnedImageRef(ref, imageDigest);
+
         const outputs = spec.outputs ?? [];
         const storeDir = deps.storeDir ?? join(process.cwd(), '.weir', 'artifacts');
-        let scratch: string | undefined;
+        const scratch = join(deps.scratchDir ?? join(process.cwd(), '.weir', 'scratch'), runId, String(seq));
+        // One resolved env for both the `-e NAME` flags and the docker CLI's own environment, so each
+        // forwarded name resolves to a value the CLI actually holds (never onto the host process table).
+        const env = resolveExecEnv();
         try {
-            if (inputs.length > 0 || outputs.length > 0) {
-                scratch = join(deps.scratchDir ?? join(process.cwd(), '.weir', 'scratch'), runId, String(seq));
-                await mkdir(scratch, { recursive: true });
-                await stageInputs(db, storeDir, scratch, inputs);
-            }
+            await mkdir(scratch, { recursive: true });
+            await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
             const raw = await runProcess({
-                argv: buildArgv(spec),
-                cwd: scratch,
+                argv: buildDockerArgv(spec, { scratch, env, mounts: dockerCapabilityMounts(), image }),
                 input: opts.input,
-                // Only the daemon env vars the workflow's declared capabilities authorize — never the
-                // daemon's full environment. See resolveExecEnv for the capability → var policy.
-                env: resolveExecEnv(),
+                env,
                 signal,
                 timeoutMs: opts.timeout,
                 onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
             });
-            const snapshot = (): Promise<StepArtifacts> =>
-                scratch && outputs.length > 0 ? snapshotOutputs(db, storeDir, scratch, outputs) : Promise.resolve({});
-            // A custom extractor can derive its result — or its own failure — from the declared outputs
-            // even on a non-zero exit, so content-address them up front (hashing only) and hand it the
-            // `path -> hash` map. The store commit is DEFERRED until the extractor accepts the run: an
-            // extractor that throws fails the step without orphaning artifacts, matching the default
-            // path's guarantee for a failed step. A snapshot failure (a declared output the step never
-            // wrote) is likewise deferred past the extractor: an extractor that raises its own failure
-            // from the raw output wins, and the missing-output error surfaces only if the extractor
-            // otherwise treated the run as a success.
-            if (spec.extract) {
-                let plan: { map: StepArtifacts; commit: () => Promise<void> } = {
-                    map: {},
-                    commit: () => Promise.resolve(),
-                };
-                let snapshotErr: unknown;
-                try {
-                    if (scratch && outputs.length > 0) plan = await planOutputs(db, storeDir, scratch, outputs);
-                } catch (e) {
-                    snapshotErr = e;
-                }
-                const result = await spec.extract({
-                    exitCode: raw.exitCode,
-                    stdout: raw.stdout,
-                    stderr: raw.stderr,
-                    // A shallow copy, not `plan.map` itself: the extractor gets a mutable `Record` it may
-                    // scribble on, but the persisted `artifacts` below must stay exactly the `path -> hash`
-                    // map that `commit()` content-addresses — else a mutating extractor could diverge a
-                    // step's recorded artifacts from what was actually stored.
-                    artifacts: { ...plan.map },
-                });
-                if (snapshotErr) throw snapshotErr;
-                await plan.commit();
-                return { result, artifacts: plan.map };
-            }
-            // Default path: the frame decoder rejects a failed run before we touch the store, so — as in
-            // the pre-extract engine — a step that fails the protocol never has its declared outputs
-            // content-addressed. Only a decode success reaches the snapshot.
+            // A container spec carries no `extract`, so the raw output is always decoded as a C1 output
+            // frame: a failed run is rejected before the store is touched, and only a decode success
+            // reaches the snapshot.
             const result = decodeFrameResult({
                 exitCode: raw.exitCode,
                 stdout: raw.stdout,
                 stderr: raw.stderr,
                 artifacts: {},
             });
-            const artifacts = await snapshot();
-            return { result, artifacts };
+            const artifacts = outputs.length > 0 ? await snapshotOutputs(db, storeDir, scratch, outputs) : {};
+            return { result, artifacts, imageDigest };
         } finally {
-            if (scratch) await rm(scratch, { recursive: true, force: true });
+            await rm(scratch, { recursive: true, force: true });
         }
     }
 
-    const execStepImpl = (name: string, spec: StepSpec, opts: StepOpts, keyOverride?: string): Promise<unknown> => {
-        // `keyOverride` carries a loop's per-iteration namespacing (`loop#L:i:name`) so a spec step
+    const containerStepImpl = (
+        name: string,
+        spec: DockerStepSpec,
+        opts: StepOpts,
+        keyOverride?: string,
+    ): Promise<unknown> => {
+        // `keyOverride` carries a loop's per-iteration namespacing (`loop#L:i:name`) so a container step
         // inside `ctx.loop` keys identically to the closure `it.step` alongside it.
         const ord = bump(state.ordinals, keyOverride ?? name);
         const key = opts.key ?? keyOverride ?? `${name}#${ord}`;
-        // A spec declaring outputs resolves to { result, artifacts }; otherwise the bare module result
-        // (backward-compatible). The artifacts map is also mirrored into the memo's `artifacts` column.
+        // A spec declaring outputs resolves to { result, artifacts }; otherwise the bare module result.
+        // The artifacts map (when present) and the image digest are also recorded in the memo's columns.
         const wantsArtifacts = (spec.outputs?.length ?? 0) > 0;
-        return memoized('exec', name, key, async (seq) => {
-            const { result, artifacts } = await runExecStep(seq, spec, opts);
-            return wantsArtifacts ? { value: { result, artifacts }, artifacts } : { value: result };
+        return memoized('container', name, key, async (seq) => {
+            const { result, artifacts, imageDigest } = await runContainerStep(seq, spec, opts);
+            return wantsArtifacts
+                ? { value: { result, artifacts }, artifacts, imageDigest }
+                : { value: result, imageDigest };
         });
     };
 
-    // Shared by `ctx.step` and loop-scoped `it.step`: `typeof` dispatch over the step body. A closure
-    // runs in-process on the host (the default surface for host-integration work); a StepSpec routes
-    // to the exec runtime as a transitional overload kept until `containerStep` lands. Both paths do
-    // identical ordinal/seq bookkeeping, so a spec and a closure key interchangeably under replay.
-    // `keyOverride` carries a loop's per-iteration namespacing (`loop#L:i:name`).
+    // Shared by `ctx.step` and loop-scoped `it.step`: a step body is a host closure. A spec argument
+    // (an object, not a function) belongs to `ctx.containerStep` now, so it throws rather than routing
+    // anywhere. `keyOverride` carries a loop's per-iteration namespacing (`loop#L:i:name`).
     const makeStepDispatch =
         (keyOverride?: (name: string) => string) =>
-        (name: string, arg2: ((s: StepCtx) => unknown) | StepSpec, opts: StepOpts = {}): Promise<unknown> =>
-            typeof arg2 === 'function'
-                ? stepImpl(name, arg2, opts, keyOverride?.(name))
-                : execStepImpl(name, arg2, opts, keyOverride?.(name));
+        (name: string, fn: (s: StepCtx) => unknown, opts: StepOpts = {}): Promise<unknown> => {
+            if (typeof fn !== 'function') {
+                throw new Error(
+                    `ctx.step("${name}") takes a closure that runs on the host; ` +
+                        `pass a container spec to ctx.containerStep instead.`,
+                );
+            }
+            return stepImpl(name, fn, opts, keyOverride?.(name));
+        };
+
+    // Shared by `ctx.containerStep` and loop-scoped `it.containerStep`, with the same per-iteration
+    // `keyOverride` as makeStepDispatch so a container step keys interchangeably with a closure step.
+    const makeContainerDispatch =
+        (keyOverride?: (name: string) => string) =>
+        (name: string, spec: DockerStepSpec, opts: StepOpts = {}): Promise<unknown> =>
+            containerStepImpl(name, spec, opts, keyOverride?.(name));
 
     const ctx: Ctx = {
         runId,
@@ -535,6 +531,7 @@ function buildCtx(
         capabilities: caps,
 
         step: makeStepDispatch() as Ctx['step'],
+        containerStep: makeContainerDispatch() as Ctx['containerStep'],
 
         loop: async <T>(opts: LoopOpts<T>, bodyFn: (it: LoopCtx) => T | Promise<T>): Promise<T> => {
             const loopId = state.loopOrd++;
@@ -546,6 +543,7 @@ function buildCtx(
                     index: i,
                     prev,
                     step: makeStepDispatch((name) => `${base}:${i}:${name}`) as LoopCtx['step'],
+                    containerStep: makeContainerDispatch((name) => `${base}:${i}:${name}`) as LoopCtx['containerStep'],
                 };
                 result = await Promise.resolve(bodyFn(it));
                 prev = result;

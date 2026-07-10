@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { resolveExecEnv, withCapabilities } from '../capabilities.ts';
 import type { Capability } from '../types.ts';
 import { parseRepoDigest, pinnedImageRef, resolveImageDigest } from './docker.ts';
-import { buildDockerArgv, dockerCapabilityMounts } from './runtime.ts';
+import { buildDockerArgv, dockerCapabilityMounts, dockerImageRef } from './runtime.ts';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const withCaps = <T>(caps: Capability[], fn: () => T): T =>
@@ -60,6 +60,23 @@ test('buildDockerArgv rejects a missing image', () => {
     expect(() => buildDockerArgv({ image: '' }, { scratch: '/s' })).toThrow(/requires an image/);
 });
 
+test('buildDockerArgv runs the `image` override (a pinned digest) in place of the resolved image', () => {
+    // Dispatch pins the runtime form's base image to a digest and hands it back via `image`; the
+    // module still bind-mounts at /opt/weir, but the container runs the exact pinned bytes.
+    const pinned = `weir-node@${DIGEST}`;
+    const argv = buildDockerArgv({ runtime: 'node', module: '/w/step.ts' }, { scratch: '/s', image: pinned });
+    expect(argv).toContain(pinned);
+    expect(argv).not.toContain('weir-node');
+    // the module mount survives the override
+    expect(argv.join(' ')).toContain('/w/step.ts:/opt/weir/module.ts:ro');
+});
+
+test('dockerImageRef returns the named image for the image form and the base image for the runtime form', () => {
+    expect(dockerImageRef({ image: 'alpine:3.20' })).toBe('alpine:3.20');
+    expect(dockerImageRef({ runtime: 'node', module: '/w/step.ts' })).toBe('weir-node');
+    expect(dockerImageRef({ runtime: 'python', module: '/w/step.py' })).toBe('weir-python');
+});
+
 test('cap-scoped env from resolveExecEnv flows into the docker argv (C7)', () => {
     const source = { PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' };
     const env = withCaps(['gh-pr'], () => resolveExecEnv(source));
@@ -70,6 +87,21 @@ test('cap-scoped env from resolveExecEnv flows into the docker argv (C7)', () =>
     expect(flat).not.toContain('ghs_secret');
     expect(flat).toContain('-e PATH');
     expect(flat).not.toContain('UNRELATED');
+});
+
+test('a container step declaring no credential capability carries no daemon secret into the argv (C7)', () => {
+    // The negative of the case above and the docker-boundary analog of the rung-1 "secret-free env"
+    // guarantee: with no credential capability, resolveExecEnv withholds the daemon's GH_TOKEN, so it's
+    // never named on the container's argv — neither by `-e NAME` nor by value. Only the operational
+    // baseline (PATH) rides along. Should env-forwarding ever leak a secret regardless of grants, this
+    // fails alongside the capabilities.test.ts gate.
+    const source = { PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' };
+    const env = withCaps([], () => resolveExecEnv(source));
+    const flat = buildDockerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
+    expect(flat).not.toContain('GH_TOKEN');
+    expect(flat).not.toContain('ghs_secret');
+    expect(flat).not.toContain('UNRELATED');
+    expect(flat).toContain('-e PATH');
 });
 
 // ---- dockerCapabilityMounts (ambient capability → mounts) ----

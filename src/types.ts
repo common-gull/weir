@@ -1,7 +1,8 @@
 // Shared types for the weir engine.
 
-import type { LocalStepSpec } from './exec/runtime.ts';
+import type { DockerStepSpec, LocalStepSpec } from './exec/runtime.ts';
 
+export type { DockerStepSpec } from './exec/runtime.ts';
 export type { ExtractInput, Extractor } from './exec/runtime.ts';
 
 export type RunStatus =
@@ -16,9 +17,10 @@ export type RunStatus =
 /** A step memo row is terminal: it either completed (result stored) or failed (error stored). */
 export type StepStatus = 'completed' | 'failed' | 'discarded';
 
-/** What kind of ctx primitive produced a memo row. `exec` is a step dispatched to the exec runtime
- *  (a subprocess) rather than an in-process closure. */
-export type StepKind = 'step' | 'exec' | 'now' | 'random' | 'uuid' | 'child' | 'approval' | 'once';
+/** What kind of ctx primitive produced a memo row. `container` is a `ctx.containerStep` dispatched to
+ *  a digest-pinned `docker run`; `exec` is the retired rung-1 subprocess kind, kept for reading rows
+ *  older runs wrote. */
+export type StepKind = 'step' | 'container' | 'exec' | 'now' | 'random' | 'uuid' | 'child' | 'approval' | 'once';
 
 export type Overlap = 'skip' | 'queue' | 'cancel-previous';
 export type Catchup = 'skip' | 'catchup_once' | 'backfill';
@@ -52,16 +54,15 @@ export interface StepOpts<T = unknown> {
     input?: unknown; // payload for a spec step — marshalled into the exec runtime's input frame
 }
 
-/** The exec-step body the `ctx.step` spec overload runs: a module the exec runtime executes in a
- *  subprocess speaking the stdio protocol. `ctx.step(name, spec, { input })` builds the runtime's argv,
- *  runs the module, and memoizes its JSON result like any step. An optional `extract` (#50) normalizes
- *  the step's raw output on the host; it defaults to the C1 frame decoder, so a protocol-speaking step
- *  is unaffected. */
+/** The rung-1 local-exec spec — a module the exec runtime runs in a subprocess speaking the C1 stdio
+ *  protocol. A public alias of {@link LocalStepSpec}; the `ctx.step` spec overload that once dispatched
+ *  it is retired (step is closures-only now), so a spec runs out-of-process through `ctx.containerStep`. */
 export type StepSpec = LocalStepSpec;
 
-/** A spec that declares `outputs`: after the run, the engine snapshots each declared path from the
- *  step's scratch dir into the artifact store and hands the workflow an {@link ExecResult}. */
-export type StepSpecWithOutputs = LocalStepSpec & { outputs: string[] };
+/** A container spec that declares `outputs`: after the run, the engine snapshots each declared path
+ *  from the step's scratch dir (bind-mounted at `/weir`) into the artifact store and hands the
+ *  workflow an {@link ExecResult}. */
+export type DockerStepSpecWithOutputs = DockerStepSpec & { outputs: string[] };
 
 /** A step's declared output path → the sha256 hash it was content-addressed to in the store. */
 export type StepArtifacts = Record<string, string>;
@@ -106,16 +107,22 @@ export interface Ctx {
     readonly capabilities: ReadonlySet<Capability>;
 
     /** A step: `ctx.step(name, fn)` runs a closure in-process on the host, memoized/replayed/retried
-     *  so a failed run resumes from it. This is the default surface for host-integration work.
-     *
-     *  A transitional overload accepts a `StepSpec` instead of a closure, routing the step to the exec
-     *  runtime (src/exec) as its own subprocess; declaring `outputs` resolves to the module's result
-     *  paired with the content hashes those outputs were snapshotted to. Kept until `ctx.containerStep`
-     *  lands as the dedicated exec surface. Dispatch is by `typeof` — a function is a host closure, an
-     *  object is a spec — and both key identically under replay. */
+     *  so a failed run resumes from it. This is the default surface for host-integration work. `step`
+     *  takes a closure only — hand a spec to {@link Ctx.containerStep} to run out-of-process. */
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
-    step<T = unknown>(name: string, spec: StepSpecWithOutputs, opts?: StepOpts<T>): Promise<ExecResult<T>>;
-    step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
+    /** A container step: `ctx.containerStep(name, spec)` runs `spec` as a digest-pinned `docker run`
+     *  child that speaks the C1 stdio protocol, memoized/replayed/retried like any step. The image is
+     *  resolved to its content `sha256` digest before it runs — the step's replay identity, recorded in
+     *  the memo (`steps.image_digest`) — so a resumed run executes the exact bytes the first attempt did.
+     *  Declaring `outputs` resolves to the module result paired with the content hashes those outputs
+     *  snapshotted to. Requires docker: an unreachable daemon or an unpinnable image fails the step, with
+     *  no host fallback. `network: true` requires the `network` capability. */
+    containerStep<T = unknown>(
+        name: string,
+        spec: DockerStepSpecWithOutputs,
+        opts?: StepOpts<T>,
+    ): Promise<ExecResult<T>>;
+    containerStep<T = unknown>(name: string, spec: DockerStepSpec, opts?: StepOpts<T>): Promise<T>;
     loop<T>(opts: LoopOpts<T>, body: (it: LoopCtx) => T | Promise<T>): Promise<T>;
     /** Fan out `fn` over `items` with bounded concurrency, each invocation memoized as its own step.
      *  `fn` runs in-process on the host, like a closure {@link step}. */
@@ -157,12 +164,17 @@ export interface StepCtx {
 export interface LoopCtx {
     readonly index: number;
     readonly prev: unknown; // previous iteration's return value (undefined on first)
-    /** The loop-scoped counterpart of {@link Ctx.step}, auto-namespaced per iteration: `it.step(name,
-     *  fn)` runs a closure in-process on the host, and the transitional `StepSpec` overload routes to
-     *  the exec runtime. Same per-iteration `loop#L:i:name` keying for both. */
+    /** The loop-scoped counterpart of {@link Ctx.step}, auto-namespaced per iteration under
+     *  `loop#L:i:name`: `it.step(name, fn)` runs a closure in-process on the host. */
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
-    step<T = unknown>(name: string, spec: StepSpecWithOutputs, opts?: StepOpts<T>): Promise<ExecResult<T>>;
-    step<T = unknown>(name: string, spec: StepSpec, opts?: StepOpts<T>): Promise<T>;
+    /** The loop-scoped counterpart of {@link Ctx.containerStep}, sharing the same per-iteration
+     *  `loop#L:i:name` keying as {@link LoopCtx.step}. */
+    containerStep<T = unknown>(
+        name: string,
+        spec: DockerStepSpecWithOutputs,
+        opts?: StepOpts<T>,
+    ): Promise<ExecResult<T>>;
+    containerStep<T = unknown>(name: string, spec: DockerStepSpec, opts?: StepOpts<T>): Promise<T>;
 }
 
 export class SkipSignal {

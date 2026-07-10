@@ -138,6 +138,21 @@ test('image and module reach the argv as standalone elements, never shell-interp
     expect(buildDockerArgv({ image, cmd: ['echo', 'hi'] }, { scratch: '/s' })).toContain(image);
 });
 
+test('the capability-scoped env is forwarded by name only, keeping secret values off the host argv', () => {
+    // The engine passes the capability-scoped resolveExecEnv (#C7) here; whatever it contains must reach
+    // the container as `-e NAME` (name only) so the value comes from the docker CLI's own environment and
+    // never lands on the host process table. A secret withheld upstream (resolveExecEnv is gated in
+    // capabilities.test.ts) simply isn't in the map, so it's never forwarded.
+    const argv = buildDockerArgv({ image: 'img' }, { scratch: '/s', env: { PATH: '/usr/bin', GH_TOKEN: 'gh-secret' } });
+    // Each name is forwarded as a bare `-e NAME`, and no element carries a value (`NAME=VALUE`).
+    for (const name of ['PATH', 'GH_TOKEN']) {
+        const i = argv.indexOf(name);
+        expect(argv[i - 1]).toBe('-e');
+    }
+    expect(argv.some((a) => a.includes('gh-secret'))).toBe(false);
+    expect(argv.some((a) => a === 'GH_TOKEN=gh-secret')).toBe(false);
+});
+
 test('runs a node module end-to-end and routes console output to the log channel', async () => {
     const logs: LogFrame[] = [];
     const out = await runProtocol({

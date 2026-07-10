@@ -227,9 +227,12 @@ function resolveDockerSpec(spec: DockerStepSpec): { image: string; cmd: string[]
  *  taken verbatim, its capability gate living in dispatch (slice 4) so this stays pure. */
 export function buildDockerArgv(
     spec: DockerStepSpec,
-    opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[] },
+    opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[]; image?: string },
 ): string[] {
-    const { image, cmd, mounts: specMounts } = resolveDockerSpec(spec);
+    const { image: resolvedImage, cmd, mounts: specMounts } = resolveDockerSpec(spec);
+    // Dispatch resolves the image to a content digest (src/exec/docker.ts) and hands the pinned ref
+    // back here, so the argv runs the exact bytes it recorded in the memo. Absent it, run the tag.
+    const image = opts.image ?? resolvedImage;
     const mounts: DockerMount[] = [{ host: opts.scratch, container: '/weir' }, ...specMounts, ...(opts.mounts ?? [])];
     const mountArgs = mounts.flatMap((m) => ['-v', mountArg(m)]);
     // `-e NAME` (name only) forwards each value from the docker CLI's own environment, which the
@@ -241,6 +244,14 @@ export function buildDockerArgv(
     // `-i` keeps the container's stdin open and forwarded so the module can read its C1 input frame;
     // without it docker closes stdin immediately and every containerized step sees EOF instead.
     return ['docker', 'run', '--rm', '-i', ...networkArgs, ...mountArgs, ...envArgs, image, ...cmd];
+}
+
+/** The image reference a docker step runs before digest-pinning — the runtime form's pinned base
+ *  image (`weir-node` / `weir-python`) or the image form's named image. Dispatch resolves this to a
+ *  content digest and passes it back as buildDockerArgv's `image` override, so both authoring forms
+ *  run — and record — the exact pinned bytes. */
+export function dockerImageRef(spec: DockerStepSpec): string {
+    return resolveDockerSpec(spec).image;
 }
 
 /** Extra bind mounts a step's *ambient* capabilities open into its container, mirroring how

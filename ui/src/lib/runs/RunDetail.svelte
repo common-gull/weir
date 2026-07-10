@@ -135,7 +135,7 @@
         <span class="dot-s s-{s.status}"></span>
         <div>
           <div class="k">{s.key} <span class="kind">· {s.kind}</span></div>
-          {#if s.result && s.kind === 'step'}<pre>{pretty(s.result)}</pre>{/if}
+          {#if s.result && (s.kind === 'step' || s.kind === 'container')}<pre>{pretty(s.result)}</pre>{/if}
         </div>
         <button type="button" class="btn sm retrybtn" onclick={() => act(() => api.retry(id, s.name))}>↻ from here</button>
       </div>
