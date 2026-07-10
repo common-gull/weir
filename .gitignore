@@ -140,9 +140,5 @@ workflows/steps/*
 !workflows/steps/pick-name.ts
 !workflows/steps/greet.ts
 
-# lib is personal — only the README (documenting what goes here) is tracked
-lib/*
-!lib/README.md
-
 .idea
 local-docs

@@ -45,10 +45,10 @@ export function currentWorkflow(): string | undefined {
 
 // ---- capability registry ----
 // A declared set of capability names + human descriptions. The built-ins are seeded below; a
-// user's lib/ tool calls `defineCapability(...)` at import time to make its custom capability
-// first-class — known to `weir doctor`/`list` and the API/UI — instead of an unvalidated
-// magic string. (Custom capabilities still *work* without registering, via the `(string & {})`
-// member of the Capability type; registering just makes them discoverable and validated.)
+// user's custom tool (e.g. under `workflows/common/`) calls `defineCapability(...)` at import time
+// to make its custom capability first-class — known to `weir doctor`/`list` and the API/UI —
+// instead of an unvalidated magic string. (Custom capabilities still *work* without registering,
+// via the `(string & {})` member of the Capability type; registering just makes them discoverable.)
 
 const registry = new Map<Capability, string>();
 
@@ -57,7 +57,7 @@ export function defineCapability(name: Capability, description: string): void {
     registry.set(name, description);
 }
 
-/** All declared capabilities, name → description. Complete only after workflows (and their lib/
+/** All declared capabilities, name → description. Complete only after workflows (and their helper
  *  imports) have loaded, since custom capabilities register when their module is imported. */
 export function knownCapabilities(): ReadonlyMap<Capability, string> {
     return registry;
@@ -88,8 +88,8 @@ defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
 // A conventional capability with no central chokepoint (there's no single place all outbound
-// traffic passes through). Seeded so it's a *known* capability, for a workflow or lib/ tool that
-// gates its own network calls — e.g. lib/slack.ts gates its fetch on its own 'slack' capability.
+// traffic passes through). Seeded so it's a *known* capability, for a workflow or helper tool that
+// gates its own network calls — e.g. workflows/common/slack.ts gates its fetch on its 'slack' capability.
 defineCapability('network', 'make arbitrary outbound network requests (self-gated; not centrally enforced)');
 
 // ---- exec-step env policy ----
