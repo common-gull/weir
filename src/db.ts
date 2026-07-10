@@ -5,6 +5,7 @@
 
 import { Database } from 'bun:sqlite';
 import { publishEvent } from './bus.ts';
+import { jsonLossReason } from './exec/protocol.ts';
 
 const SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS workflows (
@@ -172,58 +173,6 @@ export function assertSerializable(value: unknown, label: string): void {
     const lossy = jsonLossReason(value);
     if (lossy) {
         throw new Error(`step "${label}" returned a value JSON can't preserve (${lossy}) — return plain JSON data.`);
-    }
-}
-
-/** Return a human reason if JSON would silently drop/mangle `value`, or outright fail to stringify
- *  it (e.g. a throwing custom `toJSON`), else null. Top-level `undefined` is representable (callers
- *  store or normalize it as null), so it counts as no loss. */
-export function jsonLossReason(value: unknown): string | null {
-    if (value === undefined) return null;
-    const lossy = jsonLossReasonAt(value, new Set());
-    if (lossy) return lossy;
-    try {
-        JSON.stringify(value);
-        return null;
-    } catch (e) {
-        return (e as Error).message;
-    }
-}
-
-function jsonLossReasonAt(v: unknown, seen: Set<object>): string | null {
-    const t = typeof v;
-    // NaN/Infinity are numbers JSON.stringify silently coerces to null — a loss, not lossless.
-    if (t === 'number') return Number.isFinite(v as number) ? null : `a non-finite number (${v})`;
-    if (v === null || t === 'string' || t === 'boolean') return null;
-    if (t === 'function') return 'a function';
-    if (t === 'symbol') return 'a symbol';
-    if (t === 'bigint') return 'a bigint';
-    if (t !== 'object') return `a ${t}`;
-    const o = v as object;
-    if (seen.has(o)) return 'a circular reference';
-    if (o instanceof Map) return 'a Map';
-    if (o instanceof Set) return 'a Set';
-    // Track only the ancestors on the current path so shared (DAG) references — the same object
-    // reached twice via sibling fields — aren't misread as cycles; unwind on the way back out.
-    seen.add(o);
-    try {
-        if (Array.isArray(o)) {
-            for (const item of o) {
-                const r = jsonLossReasonAt(item, seen);
-                if (r) return r;
-            }
-            return null;
-        }
-        // Plain object (Date → ISO string and class instances keep their data, so both pass).
-        for (const k of Object.keys(o)) {
-            const val = (o as Record<string, unknown>)[k];
-            if (val === undefined) return `an undefined value at "${k}"`;
-            const r = jsonLossReasonAt(val, seen);
-            if (r) return r;
-        }
-        return null;
-    } finally {
-        seen.delete(o);
     }
 }
 

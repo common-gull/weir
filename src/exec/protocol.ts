@@ -7,11 +7,11 @@
 //
 // Pure encode/decode only: no spawning, no argv, no runtime knowledge. A runtime in any language
 // can implement it by reading one input frame and writing one output frame (plus optional logs).
-// `jsonLossReason` (from db.ts) guards the JSON boundary on the way out, so a frame carrying a value
-// JSON can't preserve — a function, a Map, NaN/Infinity — is rejected at encode time rather than
-// silently mangled on the wire.
-
-import { jsonLossReason } from '../db.ts';
+// `jsonLossReason` guards the JSON boundary on the way out, so a frame carrying a value JSON can't
+// preserve — a function, a Map, NaN/Infinity — is rejected at encode time rather than silently
+// mangled on the wire. It lives here, not in db.ts, so this module stays a dependency-free leaf: it's
+// baked verbatim into the weir-node base image and loaded by the node shim, where only the
+// interpreter — no bun:sqlite, no engine code — is present.
 
 /** Thrown when a frame is structurally malformed (bad JSON or missing/ill-typed fields). */
 export class ProtocolError extends Error {
@@ -119,6 +119,58 @@ function assertFrameValue(value: unknown, what: string): void {
     const lossy = jsonLossReason(value);
     if (lossy) {
         throw new ProtocolError(`${what} holds a value JSON can't preserve (${lossy}) — send plain JSON data.`);
+    }
+}
+
+/** Return a human reason if JSON would silently drop/mangle `value`, or outright fail to stringify
+ *  it (e.g. a throwing custom `toJSON`), else null. Top-level `undefined` is representable (callers
+ *  store or normalize it as null), so it counts as no loss. */
+export function jsonLossReason(value: unknown): string | null {
+    if (value === undefined) return null;
+    const lossy = jsonLossReasonAt(value, new Set());
+    if (lossy) return lossy;
+    try {
+        JSON.stringify(value);
+        return null;
+    } catch (e) {
+        return (e as Error).message;
+    }
+}
+
+function jsonLossReasonAt(v: unknown, seen: Set<object>): string | null {
+    const t = typeof v;
+    // NaN/Infinity are numbers JSON.stringify silently coerces to null — a loss, not lossless.
+    if (t === 'number') return Number.isFinite(v as number) ? null : `a non-finite number (${v})`;
+    if (v === null || t === 'string' || t === 'boolean') return null;
+    if (t === 'function') return 'a function';
+    if (t === 'symbol') return 'a symbol';
+    if (t === 'bigint') return 'a bigint';
+    if (t !== 'object') return `a ${t}`;
+    const o = v as object;
+    if (seen.has(o)) return 'a circular reference';
+    if (o instanceof Map) return 'a Map';
+    if (o instanceof Set) return 'a Set';
+    // Track only the ancestors on the current path so shared (DAG) references — the same object
+    // reached twice via sibling fields — aren't misread as cycles; unwind on the way back out.
+    seen.add(o);
+    try {
+        if (Array.isArray(o)) {
+            for (const item of o) {
+                const r = jsonLossReasonAt(item, seen);
+                if (r) return r;
+            }
+            return null;
+        }
+        // Plain object (Date → ISO string and class instances keep their data, so both pass).
+        for (const k of Object.keys(o)) {
+            const val = (o as Record<string, unknown>)[k];
+            if (val === undefined) return `an undefined value at "${k}"`;
+            const r = jsonLossReasonAt(val, seen);
+            if (r) return r;
+        }
+        return null;
+    } finally {
+        seen.delete(o);
     }
 }
 

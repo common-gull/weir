@@ -146,8 +146,10 @@ export interface DockerMount {
     readonly?: boolean;
 }
 
-/** Fixed base directory inside every weir base image: the protocol shim (and its deps) are baked
- *  here, and a runtime-form step's author module is bind-mounted alongside it. */
+/** Fixed base directory inside every weir base image: the protocol shim is baked here and a
+ *  runtime-form step's author module is bind-mounted alongside it. The shim's own deps sit one level
+ *  up (e.g. /opt/protocol.ts, matching its `../` import) and stay dependency-free leaves so the
+ *  container's plain interpreter can load them. */
 const CONTAINER_WEIR_DIR = '/opt/weir';
 
 /** Fields common to both docker authoring forms. */
