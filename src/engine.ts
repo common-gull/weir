@@ -438,10 +438,13 @@ function buildCtx(
     // capability mounts (dockerCapabilityMounts) ride along. `network: true` trades the default egress
     // lock for docker's bridge and so requires the `network` capability, gated here in dispatch so
     // buildDockerArgv stays a pure argv function. The scratch dir is torn down once outputs are stored.
+    // Invoked as the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes
+    // that attempt's `signal` — which the wrapper aborts on timeout or run cancellation — for the child.
     async function runContainerStep(
         seq: number,
         spec: DockerStepSpec,
         opts: StepOpts,
+        signal: AbortSignal,
     ): Promise<{ result: unknown; artifacts: StepArtifacts; imageDigest: string }> {
         if (spec.network) requireCapability('network');
         const ref = dockerImageRef(spec);
@@ -495,7 +498,25 @@ function buildCtx(
         // The artifacts map (when present) and the image digest are also recorded in the memo's columns.
         const wantsArtifacts = (spec.outputs?.length ?? 0) > 0;
         return memoized('container', name, key, async (seq) => {
-            const { result, artifacts, imageDigest } = await runContainerStep(seq, spec, opts);
+            // Route the container run through the shared attempt/retry/repeat/pool/timeout wrapper, so a
+            // container step honors `StepOpts` and records `step_attempts` exactly like a closure step. The
+            // thunk returns the decoded frame result — the value `repeat`'s predicate sees, matching the
+            // public `T` — while the run's artifacts and pinned image digest ride out in closure vars to
+            // reach the memo's columns (the last iteration's, aligned with the returned result).
+            let artifacts: StepArtifacts = {};
+            let imageDigest = '';
+            const result = await runStepBody(
+                seq,
+                key,
+                name,
+                async (s) => {
+                    const r = await runContainerStep(seq, spec, opts, s.signal);
+                    artifacts = r.artifacts;
+                    imageDigest = r.imageDigest;
+                    return r.result;
+                },
+                opts,
+            );
             return wantsArtifacts
                 ? { value: { result, artifacts }, artifacts, imageDigest }
                 : { value: result, imageDigest };
