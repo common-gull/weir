@@ -1,4 +1,4 @@
-// An opt-in rung-1 exec step (docs/containerized-steps.md): reached via the `ctx.step(name, spec)`
-// overload, weir spawns this module in a subprocess via the node runtime shim and memoizes its JSON
-// return. Authoring contract is just `export default (input) => output`; this step takes no input.
+// A tiny relocatable step module used by workflows/example.ts. Its `(input) => output` shape is the
+// same contract weir's container runtime (`ctx.containerStep({ runtime, module })`) runs out of
+// process; the example wraps it in a host closure so it needs no container.
 export default () => 'world';

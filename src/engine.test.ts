@@ -1,10 +1,8 @@
-import { afterEach, expect, test, beforeEach } from 'bun:test';
-import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { $ } from 'bun';
+import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { getArtifact } from './artifacts.ts';
 import { openDb, type DB } from './db.ts';
 import { clearRegistry, defineWorkflow, executeRun, type RunDeps } from './engine.ts';
 import { approveRun, createRun, retryRun } from './runs.ts';
@@ -19,35 +17,40 @@ afterEach(async () => {
     for (const d of tmpDirs.splice(0)) await rm(d, { recursive: true, force: true });
 });
 
-/** Fresh store + scratch dirs threaded to a run so its spec-step artifacts land somewhere the test
- *  can inspect; cleaned up in afterEach. */
-async function artifactDeps(): Promise<RunDeps> {
+/** Fresh store + scratch dirs threaded to a run so a container step's scratch/outputs land in a temp
+ *  dir the test controls (never the repo's .weir/); cleaned up in afterEach. */
+async function containerDeps(): Promise<RunDeps> {
     const storeDir = await mkdtemp(join(tmpdir(), 'weir-store-'));
     const scratchDir = await mkdtemp(join(tmpdir(), 'weir-scratch-'));
     tmpDirs.push(storeDir, scratchDir);
     return { storeDir, scratchDir };
 }
 
-const nodeStep = fileURLToPath(new URL('./exec/testdata/node-step.ts', import.meta.url));
-const nodeEnv = fileURLToPath(new URL('./exec/testdata/node-env.ts', import.meta.url));
-const writer = fileURLToPath(new URL('./exec/testdata/artifact-writer.ts', import.meta.url));
-const reader = fileURLToPath(new URL('./exec/testdata/artifact-reader.ts', import.meta.url));
-const exitWriter = fileURLToPath(new URL('./exec/testdata/exit-writer.ts', import.meta.url));
-
-// Run `fn` with sentinel secrets planted in the daemon env (resolveExecEnv reads process.env), then
-// restore — so an exec step's observed env can be asserted against what the policy actually forwards.
-async function withDaemonSecrets<T>(fn: () => Promise<T>): Promise<T> {
-    const prev = { GH_TOKEN: process.env.GH_TOKEN, WEIR_ENV_SNOOP: process.env.WEIR_ENV_SNOOP };
-    process.env.GH_TOKEN = 'gh-secret-xyz';
-    process.env.WEIR_ENV_SNOOP = 'daemon-only';
-    try {
-        return await fn();
-    } finally {
-        for (const [k, v] of Object.entries(prev)) {
-            if (v === undefined) delete process.env[k];
-            else process.env[k] = v;
-        }
-    }
+/** Insert a completed container-step memo row directly. A run whose seqs are already memoized
+ *  fast-forwards past them on replay and never resolves an image — so this exercises the replay path
+ *  (and lets the image_digest/artifacts columns be asserted) with no docker daemon at all. */
+function seedContainerMemo(
+    runId: string,
+    seq: number,
+    key: string,
+    name: string,
+    result: unknown,
+    imageDigest: string,
+    artifacts?: Record<string, string>,
+): void {
+    db.query(
+        `INSERT INTO steps (run_id, seq, key, name, kind, status, result, artifacts, image_digest, created_at)
+         VALUES (?, ?, ?, ?, 'container', 'completed', ?, ?, ?, ?)`,
+    ).run(
+        runId,
+        seq,
+        key,
+        name,
+        JSON.stringify(result),
+        artifacts ? JSON.stringify(artifacts) : null,
+        imageDigest,
+        Date.now(),
+    );
 }
 
 const stepNames = (runId: string) =>
@@ -334,101 +337,6 @@ test('it.step(fn): a loop closure memoizes and replays across a retry, keyed per
     expect(stepNames(id)).toEqual(['loop#0:0:work', 'after#0']);
 });
 
-test('it.step spec: runs a container step per iteration in the exec runtime', async () => {
-    defineWorkflow('loopexec', async (ctx) =>
-        ctx.loop({ max: 2 }, (it) => it.step('run', { runtime: 'node', module: nodeStep }, { input: { i: it.index } })),
-    );
-    const id = createRun(db, 'loopexec');
-    expect(await executeRun(db, id)).toBe('completed');
-
-    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-    expect(JSON.parse(run.result)).toEqual({ echoed: { i: 1 }, from: 'node' }); // loop returns the last iteration
-
-    // Each iteration memoized under the 'exec' kind with the loop's per-iteration key.
-    const steps = db.query(`SELECT kind, key FROM steps WHERE run_id = ? ORDER BY seq`).all(id) as {
-        kind: string;
-        key: string;
-    }[];
-    expect(steps).toEqual([
-        { kind: 'exec', key: 'loop#0:0:run' },
-        { kind: 'exec', key: 'loop#0:1:run' },
-    ]);
-}, 20_000);
-
-test('ctx.step spec: runs a node module in a subprocess and memoizes its JSON result', async () => {
-    defineWorkflow('exec', async (ctx) =>
-        ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 42 } }),
-    );
-    const id = createRun(db, 'exec');
-    expect(await executeRun(db, id)).toBe('completed');
-
-    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-    expect(JSON.parse(run.result)).toEqual({ echoed: { n: 42 }, from: 'node' });
-
-    // Memoized under the 'exec' kind with the same key shape as a closure step.
-    const step = db.query(`SELECT kind, key FROM steps WHERE run_id = ?`).get(id) as { kind: string; key: string };
-    expect(step).toEqual({ kind: 'exec', key: 'run-node#0' });
-
-    // Container logs (console.warn in the module) surface as step.log events.
-    const logs = db.query(`SELECT message FROM events WHERE run_id = ? AND type = 'step.log'`).all(id) as {
-        message: string;
-    }[];
-    expect(logs.some((l) => l.message === 'heads up')).toBe(true);
-}, 15_000);
-
-test('ctx.step spec: a retry replays the memoized exec result without re-running the subprocess', async () => {
-    let boom = true;
-    defineWorkflow('exec', async (ctx) => {
-        const r = await ctx.step('run-node', { runtime: 'node', module: nodeStep }, { input: { n: 1 } });
-        await ctx.step('after', () => {
-            if (boom) throw new Error('boom');
-            return 2;
-        });
-        return r;
-    });
-    const id = createRun(db, 'exec');
-    expect(await executeRun(db, id)).toBe('failed'); // exec step runs once, then `after` throws
-
-    const logCount = () =>
-        (db.query(`SELECT count(*) AS c FROM events WHERE run_id = ? AND type = 'step.log'`).get(id) as { c: number })
-            .c;
-    const before = logCount();
-    expect(before).toBeGreaterThan(0);
-
-    boom = false;
-    retryRun(db, id);
-    expect(await executeRun(db, id)).toBe('completed');
-
-    // No new subprocess ran — the exec memo replayed, so no fresh step.log events were emitted.
-    expect(logCount()).toBe(before);
-    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-    expect(JSON.parse(run.result)).toEqual({ echoed: { n: 1 }, from: 'node' });
-}, 20_000);
-
-test('ctx.step spec: a step with no credential capability runs with a secret-free env', async () => {
-    await withDaemonSecrets(async () => {
-        defineWorkflow('exec', (ctx) => ctx.step('probe-env', { runtime: 'node', module: nodeEnv }));
-        const id = createRun(db, 'exec');
-        expect(await executeRun(db, id)).toBe('completed');
-        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-        // The child sees neither the gh token nor the arbitrary daemon var — only the PATH baseline.
-        expect(JSON.parse(run.result)).toEqual({ GH_TOKEN: null, SNOOP: null, hasPath: true });
-    });
-}, 15_000);
-
-test('ctx.step spec: a step declaring gh-pr receives GH_TOKEN (only) in its env', async () => {
-    await withDaemonSecrets(async () => {
-        defineWorkflow('exec', { capabilities: ['gh-pr'] }, (ctx) =>
-            ctx.step('probe-env', { runtime: 'node', module: nodeEnv }),
-        );
-        const id = createRun(db, 'exec');
-        expect(await executeRun(db, id)).toBe('completed');
-        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-        // gh-pr forwards GH_TOKEN, but no other daemon secret rides along.
-        expect(JSON.parse(run.result)).toEqual({ GH_TOKEN: 'gh-secret-xyz', SNOOP: null, hasPath: true });
-    });
-}, 15_000);
-
 test('retryRun --from matches step names exactly (no substring over-delete)', async () => {
     const ran: string[] = [];
     defineWorkflow('t', async (ctx) => {
@@ -450,250 +358,129 @@ test('retryRun --from matches step names exactly (no substring over-delete)', as
     expect(ran).toEqual(['deploy']);
 });
 
-test('exec artifacts: declared outputs are content-addressed into the store and recorded in the memo', async () => {
-    const deps = await artifactDeps();
-    defineWorkflow('produce', async (ctx) =>
-        ctx.step(
-            'make',
-            { runtime: 'node', module: writer, outputs: ['out.txt'] },
-            { input: { path: 'out.txt', text: 'hello-artifact' } },
-        ),
+// ---- containerStep (rung-2 docker) ----
+
+test('ctx.step / it.step reject a spec argument, pointing at ctx.containerStep', async () => {
+    // The polarity flip: ctx.step is closures-only. A spec (an object, not a function) is
+    // ctx.containerStep's job now, so the dispatch throws for it — a runtime guard, over the type ban,
+    // for an untyped-JS caller. The message names containerStep.
+    defineWorkflow('specreject', async (ctx) => ctx.step('run', { image: 'alpine' } as unknown as () => unknown));
+    const top = createRun(db, 'specreject');
+    expect(await executeRun(db, top)).toBe('failed');
+    const topErr = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(top) as { error: string }).error);
+    expect(topErr.message).toMatch(/containerStep/);
+
+    // Same guard on the loop-scoped it.step.
+    defineWorkflow('loopreject', async (ctx) =>
+        ctx.loop({ max: 1 }, (it) => it.step('run', { image: 'alpine' } as unknown as () => unknown)),
     );
-    const id = createRun(db, 'produce');
-    expect(await executeRun(db, id, deps)).toBe('completed');
+    const loop = createRun(db, 'loopreject');
+    expect(await executeRun(db, loop)).toBe('failed');
+    const loopErr = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(loop) as { error: string }).error);
+    expect(loopErr.message).toMatch(/containerStep/);
+});
 
-    // The path -> hash map is recorded in the step's memo row (the additive `artifacts` column).
-    const step = db.query(`SELECT artifacts FROM steps WHERE run_id = ?`).get(id) as { artifacts: string };
-    const map = JSON.parse(step.artifacts) as Record<string, string>;
-    const hash = map['out.txt'] ?? '';
-    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+test('containerStep: network:true without the network capability fails before touching docker', async () => {
+    // The capability gate is the FIRST thing dispatch does, ahead of image resolution — so an
+    // undeclared `network` fails loudly without a daemon in reach (this test needs no docker).
+    defineWorkflow('needsnet', {}, (ctx) => ctx.containerStep('go', { image: 'alpine', network: true }));
+    const id = createRun(db, 'needsnet');
+    expect(await executeRun(db, id)).toBe('failed');
+    const err = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string }).error);
+    expect(err.message).toMatch(/network/);
+    // Gate precedes image resolution, and a failed step isn't memoized — so nothing was recorded.
+    const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
+    expect(n.n).toBe(0);
+});
 
-    // The bytes live in the store under that hash, and the workflow saw { result, artifacts }.
-    expect(await readFile(getArtifact(deps.storeDir ?? '', hash), 'utf8')).toBe('hello-artifact');
-    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-    expect(JSON.parse(run.result)).toEqual({ result: { wrote: 'out.txt' }, artifacts: { 'out.txt': hash } });
-}, 20_000);
-
-test('exec artifacts: a downstream step receives declared input artifacts staged into its scratch', async () => {
-    const deps = await artifactDeps();
-    defineWorkflow('chain', async (ctx) => {
-        const a = await ctx.step(
-            'make',
-            { runtime: 'node', module: writer, outputs: ['out.txt'] },
-            { input: { path: 'out.txt', text: 'chained-bytes' } },
-        );
-        // Declare the produced hash as an input of the next step, staged in under a new name.
-        return ctx.step(
-            'use',
-            { runtime: 'node', module: reader, inputs: [{ hash: a.artifacts['out.txt'] ?? '', path: 'in.txt' }] },
-            { input: { path: 'in.txt' } },
-        );
+test('containerStep: a completed memo replays top-level and per-iteration with no docker', async () => {
+    // Seed each container step as a completed memo, then run: dispatch fast-forwards past all three
+    // seqs, so resolveImageDigest/docker are never reached. Proves replay, per-iteration namespacing,
+    // and that the image_digest + artifacts columns round-trip through the memo.
+    defineWorkflow('replay', async (ctx) => {
+        const built = await ctx.containerStep('build', { image: 'alpine:3.20', outputs: ['out.txt'] });
+        const last = await ctx.loop({ max: 2 }, (it) => it.containerStep('shard', { image: 'busybox' }));
+        return { built, last };
     });
-    const id = createRun(db, 'chain');
-    expect(await executeRun(db, id, deps)).toBe('completed');
-
-    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-    expect(JSON.parse(run.result)).toEqual({ content: 'chained-bytes' });
-}, 20_000);
-
-test('exec artifacts: re-running an identical step replays the stored artifact instead of rebuilding', async () => {
-    const deps = await artifactDeps();
-    let boom = true;
-    defineWorkflow('rebuild', async (ctx) => {
-        const a = await ctx.step(
-            'make',
-            { runtime: 'node', module: writer, outputs: ['out.txt'] },
-            { input: { path: 'out.txt', text: 'once' } },
-        );
-        await ctx.step('gate', () => {
-            if (boom) throw new Error('boom');
-            return 1;
-        });
-        return a;
+    const id = createRun(db, 'replay');
+    const digest = `sha256:${'a'.repeat(64)}`;
+    // A step declaring outputs stored { result, artifacts } as its memo value; the plain ones stored a
+    // bare result. The artifacts column mirrors the map independently.
+    seedContainerMemo(id, 0, 'build#0', 'build', { result: { ok: true }, artifacts: { 'out.txt': 'beef' } }, digest, {
+        'out.txt': 'beef',
     });
-    const id = createRun(db, 'rebuild');
-    expect(await executeRun(db, id, deps)).toBe('failed'); // writer runs once, then `gate` throws
+    seedContainerMemo(id, 1, 'loop#0:0:shard', 'shard', 0, digest);
+    seedContainerMemo(id, 2, 'loop#0:1:shard', 'shard', 1, digest);
 
-    const writes = () =>
-        (
-            db
-                .query(`SELECT count(*) AS c FROM events WHERE run_id = ? AND type = 'step.log' AND message = 'WRITE'`)
-                .get(id) as { c: number }
-        ).c;
-    expect(writes()).toBe(1);
-    const step0 = db.query(`SELECT artifacts FROM steps WHERE run_id = ? AND key = 'make#0'`).get(id) as {
-        artifacts: string;
-    };
-    const hash = (JSON.parse(step0.artifacts) as Record<string, string>)['out.txt'] ?? '';
+    expect(await executeRun(db, id)).toBe('completed');
 
-    boom = false;
-    retryRun(db, id);
-    expect(await executeRun(db, id, deps)).toBe('completed');
+    const rows = db
+        .query(`SELECT key, kind, image_digest, artifacts FROM steps WHERE run_id = ? ORDER BY seq`)
+        .all(id) as { key: string; kind: string; image_digest: string | null; artifacts: string | null }[];
+    // Per-iteration namespacing preserved on replay — a mismatched key would raise a DeterminismError.
+    expect(rows.map((r) => r.key)).toEqual(['build#0', 'loop#0:0:shard', 'loop#0:1:shard']);
+    expect(rows.every((r) => r.kind === 'container')).toBe(true);
+    expect(rows.every((r) => r.image_digest === digest)).toBe(true);
+    expect(JSON.parse(rows[0]?.artifacts ?? 'null')).toEqual({ 'out.txt': 'beef' });
 
-    // The writer subprocess did NOT run again — the memo replayed the stored artifact by hash.
-    expect(writes()).toBe(1);
-    expect(existsSync(getArtifact(deps.storeDir ?? '', hash))).toBe(true);
-    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-    expect(JSON.parse(run.result)).toEqual({ result: { wrote: 'out.txt' }, artifacts: { 'out.txt': hash } });
-}, 20_000);
-
-test('ctx.step extract: a custom extractor bridges a non-frame, non-zero-exit process into a result', async () => {
-    const deps = await artifactDeps();
-    defineWorkflow('bridge', async (ctx) =>
-        ctx.step(
-            'stock',
-            {
-                runtime: 'node',
-                module: exitWriter,
-                outputs: ['out.json'],
-                // The stock process exits 2 and never returns a protocol result; the host adapts its raw
-                // output (exit code + captured artifact + raw stdout) into the step result rather than
-                // letting the default frame decoder fail it. It PARSES data — no eval, no shell.
-                extract: ({ exitCode, stdout, artifacts }) => ({
-                    exitCode,
-                    sawStdout: stdout.length > 0,
-                    artifact: artifacts['out.json'],
-                }),
-            },
-            { input: { path: 'out.json', text: 'payload', code: 2 } },
-        ),
-    );
-    const id = createRun(db, 'bridge');
-    expect(await executeRun(db, id, deps)).toBe('completed');
-
-    const step = db.query(`SELECT artifacts FROM steps WHERE run_id = ?`).get(id) as { artifacts: string };
-    const hash = (JSON.parse(step.artifacts) as Record<string, string>)['out.json'] ?? '';
-    expect(hash).toMatch(/^[0-9a-f]{64}$/);
-
-    // Outputs are declared, so the step resolves to { result, artifacts }; `result` is the extractor's
-    // return, proving the engine surfaced the non-zero exit and the content-addressed artifact to it.
     const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
     expect(JSON.parse(run.result)).toEqual({
-        result: { exitCode: 2, sawStdout: true, artifact: hash },
-        artifacts: { 'out.json': hash },
+        built: { result: { ok: true }, artifacts: { 'out.txt': 'beef' } },
+        last: 1,
     });
-    expect(await readFile(getArtifact(deps.storeDir ?? '', hash), 'utf8')).toBe('payload');
-}, 20_000);
+});
 
-test('ctx.step extract: mutating the extractor artifacts map does not corrupt the persisted record', async () => {
-    const deps = await artifactDeps();
-    defineWorkflow('mutate', async (ctx) =>
-        ctx.step(
-            'stock',
-            {
-                runtime: 'node',
-                module: exitWriter,
-                outputs: ['out.json'],
-                // A misbehaving extractor scribbles on its `artifacts` input — overwrites the real hash and
-                // adds a bogus key. The persisted record must stay the content-addressed map the engine
-                // committed, not whatever the extractor left behind.
-                extract: ({ artifacts }) => {
-                    artifacts['out.json'] = 'not-a-hash';
-                    artifacts.injected = 'bogus';
-                    return { ok: true };
-                },
-            },
-            { input: { path: 'out.json', text: 'payload', code: 2 } },
-        ),
-    );
-    const id = createRun(db, 'mutate');
-    expect(await executeRun(db, id, deps)).toBe('completed');
+// ---- real-docker (gated: skipped when the daemon is absent, so CI stays green) ----
 
-    const step = db.query(`SELECT artifacts FROM steps WHERE run_id = ?`).get(id) as { artifacts: string };
-    const persisted = JSON.parse(step.artifacts) as Record<string, string>;
-    // The extractor's mutations are absent: the real content-addressed hash survives, the injected key does not.
-    expect(persisted.injected).toBeUndefined();
-    expect(persisted['out.json']).toMatch(/^[0-9a-f]{64}$/);
-    expect(await readFile(getArtifact(deps.storeDir ?? '', persisted['out.json'] ?? ''), 'utf8')).toBe('payload');
-}, 20_000);
+const HAS_DOCKER = Bun.which('docker') !== null;
+const dockerTest = HAS_DOCKER ? test : test.skip;
 
-test('ctx.step extract: without an extractor, the default frame decoder still fails that same process', async () => {
-    const deps = await artifactDeps();
-    defineWorkflow('nobridge', async (ctx) =>
-        ctx.step(
-            'stock',
-            { runtime: 'node', module: exitWriter, outputs: ['out.json'] },
-            {
-                input: { path: 'out.json', text: 'payload', code: 2 },
-            },
-        ),
-    );
-    const id = createRun(db, 'nobridge');
-    // Byte-identical to today: the shim's failure frame fails the step under the default decoder.
-    expect(await executeRun(db, id, deps)).toBe('failed');
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(JSON.parse(run.error).message).toContain('exited the process before returning a result');
-    // The default decoder rejects the failed run before the store is touched, so the output the shim
-    // wrote (out.json) is never content-addressed — no orphan artifact rows from a failed step.
-    const count = db.query(`SELECT COUNT(*) AS n FROM artifacts`).get() as { n: number };
-    expect(count.n).toBe(0);
-}, 20_000);
+dockerTest(
+    'containerStep: runs a pinned container, records its digest, needs no capability',
+    async () => {
+        // A local image with a repo digest to pin against (inspect never pulls). Skip if the pull can't run
+        // (offline) — the point here is dispatch + pinning, not the network.
+        try {
+            await $`docker pull busybox:latest`.quiet();
+        } catch {
+            return;
+        }
+        const deps = await containerDeps();
+        // A shell one-liner that speaks the C1 protocol: emit one output frame on stdout (the step needs
+        // no input, and runProcess tolerates a child that exits before draining stdin). Absolute
+        // `/bin/sh` + the `printf` builtin, since dispatch forwards the host PATH into the container as
+        // `-e PATH`. No capability is declared and the default is --network none, so this doubles as
+        // proof a sandboxed step needs no capability at all.
+        const cmd = ['/bin/sh', '-c', 'printf %s \'{"ok":true,"result":{"from":"container"}}\''];
+        defineWorkflow('run', {}, (ctx) => ctx.containerStep('go', { image: 'busybox:latest', cmd }));
+        const id = createRun(db, 'run');
+        expect(await executeRun(db, id, deps)).toBe('completed');
 
-test('ctx.step extract: an extractor that throws fails the step with its own error', async () => {
-    defineWorkflow('reject', async (ctx) =>
-        ctx.step(
-            'run',
-            {
-                runtime: 'node',
-                module: nodeStep,
-                extract: ({ stdout }) => {
-                    throw new Error(`extractor rejected ${stdout.length} bytes`);
-                },
-            },
-            { input: { n: 1 } },
-        ),
-    );
-    const id = createRun(db, 'reject');
-    expect(await executeRun(db, id)).toBe('failed');
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(JSON.parse(run.error).message).toContain('extractor rejected');
-}, 15_000);
+        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+        expect(JSON.parse(run.result)).toEqual({ from: 'container' });
 
-test('ctx.step extract: an extractor that throws leaves no orphan artifacts from its declared outputs', async () => {
-    const deps = await artifactDeps();
-    defineWorkflow('reject-artifacts', async (ctx) =>
-        ctx.step(
-            'run',
-            {
-                runtime: 'node',
-                module: writer,
-                outputs: ['out.txt'],
-                extract: () => {
-                    throw new Error('extractor rejected the run');
-                },
-            },
-            { input: { path: 'out.txt', text: 'wrote-but-rejected' } },
-        ),
-    );
-    const id = createRun(db, 'reject-artifacts');
-    expect(await executeRun(db, id, deps)).toBe('failed');
-    const run = db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string };
-    expect(JSON.parse(run.error).message).toContain('extractor rejected');
-    // The declared output was written and content-addressed for the extractor, but the store commit is
-    // deferred until the extractor accepts the run — so a rejecting extractor orphans nothing, matching
-    // the default decoder's guarantee ('without an extractor', above).
-    const count = db.query(`SELECT COUNT(*) AS n FROM artifacts`).get() as { n: number };
-    expect(count.n).toBe(0);
-}, 20_000);
+        // The engine wrote the resolved content digest into the memo — the step's replay identity.
+        const step = db.query(`SELECT kind, image_digest FROM steps WHERE run_id = ?`).get(id) as {
+            kind: string;
+            image_digest: string | null;
+        };
+        expect(step.kind).toBe('container');
+        expect(step.image_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    },
+    60_000,
+);
 
-test('ctx.step extract: an async extractor is awaited, so its resolved value is the step result', async () => {
-    defineWorkflow('async-extract', async (ctx) =>
-        ctx.step(
-            'run',
-            {
-                runtime: 'node',
-                module: nodeStep,
-                extract: async ({ exitCode }) => {
-                    await Promise.resolve();
-                    return { ok: exitCode === 0, via: 'async' };
-                },
-            },
-            { input: { n: 1 } },
-        ),
-    );
-    const id = createRun(db, 'async-extract');
-    expect(await executeRun(db, id)).toBe('completed');
-    // Without the await the stored result would be a serialized pending Promise ({}), not this object.
-    const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
-    expect(JSON.parse(run.result)).toEqual({ ok: true, via: 'async' });
-}, 15_000);
+dockerTest(
+    'containerStep: an unpinnable image fails the step loudly (no host fallback)',
+    async () => {
+        // No local repo digest to read → resolveImageDigest rejects → the step fails; nothing lets it
+        // silently fall back to a host process.
+        defineWorkflow('bad', {}, (ctx) => ctx.containerStep('go', { image: 'weir-does-not-exist:none-xyz-000' }));
+        const id = createRun(db, 'bad');
+        expect(await executeRun(db, id)).toBe('failed');
+        // A failed step isn't memoized.
+        const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
+        expect(n.n).toBe(0);
+    },
+    30_000,
+);
