@@ -89,6 +89,21 @@ test('cap-scoped env from resolveExecEnv flows into the docker argv (C7)', () =>
     expect(flat).not.toContain('UNRELATED');
 });
 
+test('a container step declaring no credential capability carries no daemon secret into the argv (C7)', () => {
+    // The negative of the case above and the docker-boundary analog of the rung-1 "secret-free env"
+    // guarantee: with no credential capability, resolveExecEnv withholds the daemon's GH_TOKEN, so it's
+    // never named on the container's argv — neither by `-e NAME` nor by value. Only the operational
+    // baseline (PATH) rides along. Should env-forwarding ever leak a secret regardless of grants, this
+    // fails alongside the capabilities.test.ts gate.
+    const source = { PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' };
+    const env = withCaps([], () => resolveExecEnv(source));
+    const flat = buildDockerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
+    expect(flat).not.toContain('GH_TOKEN');
+    expect(flat).not.toContain('ghs_secret');
+    expect(flat).not.toContain('UNRELATED');
+    expect(flat).toContain('-e PATH');
+});
+
 // ---- dockerCapabilityMounts (ambient capability → mounts) ----
 
 test('dockerCapabilityMounts is empty without the claude capability', () => {
