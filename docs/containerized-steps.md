@@ -123,8 +123,9 @@ both halves of a container run — the `run` itself (`buildContainerArgv`, `src/
 digest-resolving `image inspect` that pins the image (`resolveImageDigest`, `src/exec/image.ts`). Left
 unset, the runtime binary is `docker`, exactly as before the knob existed.
 
-This is a *validated target*, not a transparent multi-runtime abstraction — podman is a supported binary
-weir accounts for where it diverges from docker, not a drop-in weir pretends is docker:
+This is a *validated target*, not a transparent multi-runtime abstraction — **podman** is the one
+non-docker binary weir accounts for where it diverges from docker, not a drop-in weir pretends is
+docker:
 
 - **SELinux relabel.** The per-step scratch dir is bind-mounted with the `:Z` (private) relabel suffix,
   so under an enforcing policy a container running as `container_t` may write `/weir` — otherwise a hard
@@ -137,6 +138,12 @@ weir accounts for where it diverges from docker, not a drop-in weir pretends is 
   treated as a specific supported binary rather than an interchangeable one.
 - **Rootless userns.** podman's rootless user-namespace mapping shifts container-side file ownership; a
   module that reasons about uid/gid on its staged inputs or outputs should account for it.
+
+**`nerdctl`** is docker-CLI-compatible enough that the `WEIR_CONTAINER_RUNTIME` knob accepts it and
+`weir doctor` will nudge you toward it — but weir has *not* validated it against the three divergences
+above. Whether it honors the `:Z` relabel suffix, populates `RepoDigests` for locally-built images, and
+how it maps rootless namespaces are all unverified; treat those as things to confirm yourself before
+relying on a nerdctl runtime, rather than podman's behavior carried over.
 
 `weir doctor` checks the *configured* runtime and **nudges rather than auto-falls-back**: if
 `WEIR_CONTAINER_RUNTIME` names a binary that isn't installed but a known alternative (`podman`,
