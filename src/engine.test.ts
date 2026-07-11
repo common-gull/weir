@@ -7,6 +7,7 @@ import { getArtifact } from './artifacts.ts';
 import { openDb, type DB } from './db.ts';
 import { clearRegistry, defineWorkflow, executeRun, type RunDeps } from './engine.ts';
 import { approveRun, createRun, retryRun } from './runs.ts';
+import type { Ctx, StandardSchemaV1 } from './types.ts';
 
 let db: DB;
 const tmpDirs: string[] = [];
@@ -495,6 +496,26 @@ test('containerStep: acquires its declared pool through the shared wrapper (no d
     expect(released).toBe(1); // and released in the wrapper's finally
 });
 
+/** A hand-rolled Standard Schema v1 validator — the structural `~standard` interface zod/valibot/arktype
+ *  all expose, so weir needs no library to validate against one. */
+function schema<Output>(
+    validate: StandardSchemaV1<unknown, Output>['~standard']['validate'],
+): StandardSchemaV1<unknown, Output> {
+    return { '~standard': { version: 1, vendor: 'test', validate } };
+}
+
+// Compile-time proof (#64) that a `schema` on the spec narrows containerStep's return type — never
+// invoked, checked by `bun run typecheck`. Each local is typed `number`, which compiles only if the
+// step's result was narrowed to the schema's `{ count: number }` output rather than left `unknown`.
+async function _schemaNarrowsReturnType(ctx: Ctx, s: StandardSchemaV1<unknown, { count: number }>) {
+    const bare: number = (await ctx.containerStep('bare', { image: 'x', schema: s })).count;
+    const withOutputs: number = (await ctx.containerStep('out', { image: 'x', outputs: ['o'], schema: s })).result
+        .count;
+    const looped: number = (await ctx.loop({ max: 1 }, (it) => it.containerStep('l', { image: 'x', schema: s }))).count;
+    return { bare, withOutputs, looped };
+}
+void _schemaNarrowsReturnType;
+
 // ---- real-docker (gated: skipped when the daemon is absent, so CI stays green) ----
 
 const HAS_DOCKER = Bun.which('docker') !== null;
@@ -589,9 +610,10 @@ dockerTest(
 dockerTest(
     'containerStep: a failing step declaring outputs orphans no artifacts',
     async () => {
-        // decodeFrameResult runs before snapshotOutputs, so a non-zero exit with no frame fails the step
-        // before the store is ever touched — the docker-runtime analogue of the exec path's
-        // deferred-commit guarantee. The output is written but the run rejects, so nothing is committed.
+        // Outputs are planned (hashed) but committed only after extraction succeeds, so a non-zero exit
+        // with no frame fails the decode before the store is ever touched — the docker-runtime analogue of
+        // the exec path's deferred-commit guarantee. The output is written but the run rejects, so nothing
+        // is committed.
         try {
             await $`docker pull busybox:latest`.quiet();
         } catch {
@@ -679,6 +701,47 @@ dockerTest(
         expect(attempts.every((a) => a.status === 'succeeded')).toBe(true);
         const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
         expect(JSON.parse(run.result)).toBe(42); // the last iteration's result is what memoizes
+    },
+    60_000,
+);
+
+dockerTest(
+    'containerStep: a declared schema validates the boundary result — passes clean, fails with issue text',
+    async () => {
+        // End-to-end through a real container: the module emits a C1 frame, the default decoder returns
+        // its result, and the spec's `schema` is asserted on that value at the extract boundary. A passing
+        // value flows through; a failing one rejects the step with the validator's issue and commits nothing.
+        try {
+            await $`docker pull busybox:latest`.quiet();
+        } catch {
+            return;
+        }
+        const positiveN = schema<{ n: number }>((v) => {
+            const n = (v as { n?: unknown } | null)?.n;
+            return typeof n === 'number' && n > 0
+                ? { value: { n } }
+                : { issues: [{ message: 'must be positive', path: ['n'] }] };
+        });
+        const frame = (n: number) => ['/bin/sh', '-c', `printf %s '{"ok":true,"result":{"n":${n}}}'`];
+
+        defineWorkflow('okschema', {}, (ctx) =>
+            ctx.containerStep('go', { image: 'busybox:latest', cmd: frame(3), schema: positiveN }),
+        );
+        const ok = createRun(db, 'okschema');
+        expect(await executeRun(db, ok, await containerDeps())).toBe('completed');
+        const okRun = db.query(`SELECT result FROM runs WHERE id = ?`).get(ok) as { result: string };
+        expect(JSON.parse(okRun.result)).toEqual({ n: 3 });
+
+        defineWorkflow('badschema', {}, (ctx) =>
+            ctx.containerStep('go', { image: 'busybox:latest', cmd: frame(-1), schema: positiveN }),
+        );
+        const bad = createRun(db, 'badschema');
+        expect(await executeRun(db, bad, await containerDeps())).toBe('failed');
+        const err = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(bad) as { error: string }).error);
+        expect(err.message).toContain('schema validation failed');
+        expect(err.message).toContain('n: must be positive'); // path-qualified, actionable
+        // A schema failure isn't memoized — the step re-runs on retry like any other failure.
+        expect((db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(bad) as { n: number }).n).toBe(0);
     },
     60_000,
 );

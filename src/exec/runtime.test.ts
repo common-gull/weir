@@ -12,10 +12,15 @@ import {
     buildArgv,
     buildDockerArgv,
     type DockerStepSpec,
+    type ExtractInput,
+    type Extractor,
+    extractResult,
     type LocalStepSpec,
     planOutputs,
     snapshotOutputs,
+    type StandardSchemaV1,
     stageInputs,
+    validateWithSchema,
 } from './runtime.ts';
 import { runProtocol } from './spawn.ts';
 
@@ -455,4 +460,72 @@ test('staging refuses a directory blob whose member escapes via a traversing pat
         // Nothing was extracted, so no member climbed out of the destination onto the host.
         expect(existsSync(join(b, 'tree'))).toBe(false);
     });
+});
+
+// ---- boundary schema validation (#64) ----
+
+/** A hand-rolled Standard Schema v1 validator — no zod/valibot dependency needed to prove weir speaks
+ *  the structural `~standard` interface every such library exposes. The `<Output>` phantom flows into
+ *  InferSchemaOutput exactly as a real validator's does. */
+function schema<Output>(
+    validate: StandardSchemaV1<unknown, Output>['~standard']['validate'],
+): StandardSchemaV1<unknown, Output> {
+    return { '~standard': { version: 1, vendor: 'test', validate } };
+}
+
+const rawOutput = (over: Partial<ExtractInput> = {}): ExtractInput => ({
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+    artifacts: {},
+    ...over,
+});
+
+test('validateWithSchema returns the validated value when the validator passes', async () => {
+    const s = schema<{ n: number }>((value) => ({ value: value as { n: number } }));
+    expect(await validateWithSchema(s, { n: 7 })).toEqual({ n: 7 });
+});
+
+test('validateWithSchema awaits an async validator', async () => {
+    const s = schema<string>((value) => Promise.resolve({ value: value as string }));
+    expect(await validateWithSchema(s, 'ok')).toBe('ok');
+});
+
+test('validateWithSchema throws actionable, path-qualified text listing every issue', async () => {
+    const s = schema(() => ({
+        issues: [
+            { message: 'expected number', path: ['user', { key: 'age' }] }, // raw key + { key } segment
+            { message: 'is required' }, // pathless issue
+        ],
+    }));
+    await expect(validateWithSchema(s, {})).rejects.toThrow(/schema validation failed/);
+    // The message names both the offending path and the pathless issue, so a caller sees what was wrong.
+    await expect(validateWithSchema(s, {})).rejects.toThrow(/user\.age: expected number/);
+    await expect(validateWithSchema(s, {})).rejects.toThrow(/is required/);
+});
+
+test('extractResult falls back to the default decoder when the spec declares no extract', async () => {
+    const decode: Extractor = (raw) => ({ decoded: raw.stdout });
+    expect(await extractResult({}, rawOutput({ stdout: 'hi' }), decode)).toEqual({ decoded: 'hi' });
+});
+
+test('extractResult runs a custom extract in place of the default decoder, with the outputs map', async () => {
+    const decode: Extractor = () => {
+        throw new Error('the default decoder must not run when extract is provided');
+    };
+    const spec = { extract: (raw: ExtractInput) => ({ code: raw.exitCode, out: raw.artifacts['out.txt'] }) };
+    const result = await extractResult(spec, rawOutput({ exitCode: 2, artifacts: { 'out.txt': 'deadbeef' } }), decode);
+    expect(result).toEqual({ code: 2, out: 'deadbeef' });
+});
+
+test('extractResult validates the extracted value against the schema on both extract paths', async () => {
+    const positive = schema<number>((value) =>
+        typeof value === 'number' && value > 0 ? { value } : { issues: [{ message: 'must be positive' }] },
+    );
+    // default decoder → schema
+    expect(await extractResult({ schema: positive }, rawOutput(), () => 5)).toBe(5);
+    // custom extract → schema
+    expect(await extractResult({ schema: positive, extract: () => 9 }, rawOutput(), () => 0)).toBe(9);
+    // a value the validator rejects fails the step with its issue text, on either path
+    await expect(extractResult({ schema: positive }, rawOutput(), () => -1)).rejects.toThrow(/must be positive/);
 });

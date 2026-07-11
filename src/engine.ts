@@ -24,7 +24,8 @@ import {
     type DockerStepSpec,
     dockerImageRef,
     type ExtractInput,
-    snapshotOutputs,
+    extractResult,
+    planOutputs,
     stageInputs,
 } from './exec/runtime.ts';
 import { runProcess } from './exec/spawn.ts';
@@ -113,9 +114,10 @@ export class ParkSignal extends Error {
 export class DeterminismError extends Error {}
 export class CancelledError extends Error {}
 
-/** Interpret a container step's raw process output as a C1 output frame — the only way a
- *  `ctx.containerStep` result is decoded. A non-zero exit with no frame, a malformed frame, or an
- *  `{ ok:false }` frame each fail the step; an `{ ok:true }` frame yields its result. */
+/** Interpret a container step's raw process output as a C1 output frame — the default `extractResult`
+ *  decoder, used unless the spec declares its own `extract`. A non-zero exit with no frame, a
+ *  malformed frame, or an `{ ok:false }` frame each fail the step; an `{ ok:true }` frame yields its
+ *  result. */
 function decodeFrameResult(raw: ExtractInput): unknown {
     const frame = decodeProcessOutput(raw.exitCode, raw.stdout);
     if (!frame.ok) throw new Error(frame.error);
@@ -472,16 +474,19 @@ function buildCtx(
                 signal,
                 onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
             });
-            // A container spec carries no `extract`, so the raw output is always decoded as a C1 output
-            // frame: a failed run is rejected before the store is touched, and only a decode success
-            // reaches the snapshot.
-            const result = decodeFrameResult({
-                exitCode: raw.exitCode,
-                stdout: raw.stdout,
-                stderr: raw.stderr,
-                artifacts: {},
-            });
-            const artifacts = outputs.length > 0 ? await snapshotOutputs(db, storeDir, scratch, outputs) : {};
+            // Content-address the declared outputs (hash only — no store commit yet) so a custom
+            // `extract` can key on the resulting `path -> hash` map, then normalize the raw output into
+            // the step result: the spec's `extract` (the C1 frame decoder by default) followed by
+            // optional `schema` validation at this trust boundary. Commit the outputs only once that
+            // succeeds, so a rejecting extractor or a failing validator — like a failed decode — leaves
+            // no orphan artifacts in the store.
+            const { map: artifacts, commit } = await planOutputs(db, storeDir, scratch, outputs);
+            const result = await extractResult(
+                spec,
+                { exitCode: raw.exitCode, stdout: raw.stdout, stderr: raw.stderr, artifacts },
+                decodeFrameResult,
+            );
+            await commit();
             return { result, artifacts };
         } finally {
             await rm(scratch, { recursive: true, force: true });

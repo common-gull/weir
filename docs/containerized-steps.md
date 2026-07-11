@@ -153,6 +153,29 @@ Two properties make this safe and dependable:
   (streamed stderr during the run) is unchanged — `extract` is end-of-run result normalization only,
   never the log path.
 
+## Schema validation at the extract boundary
+
+An optional `schema` on a container spec makes the boundary assertion above concrete. It accepts any
+[Standard Schema v1](https://standardschema.dev) validator — the structural `~standard` interface zod,
+valibot, and arktype all expose, so there's no new dependency and no adapter. weir runs it on the
+extractor's return (the frame decoder's by default), on the trusted host, once, as the result re-enters
+the control plane:
+
+```ts
+import { z } from 'zod';
+
+const built = await ctx.containerStep('build', {
+    image: 'my-builder@sha256:…',
+    outputs: ['dist/'],
+    schema: z.object({ version: z.string(), warnings: z.number() }),
+});
+built.result.version; // narrowed to string — a passing validator types the step's result
+```
+
+A value the validator rejects fails the step with its issues in the error (each `path: message`), before
+any declared outputs are committed — the same deferred-commit guarantee a failed decode already gives.
+Validation is result-side only; input-side validation isn't covered here.
+
 ## See also
 
 `workflows/example.ts` is a tracked, tested demonstration: a host-closure step and rung-1 exec steps

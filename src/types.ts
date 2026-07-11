@@ -1,8 +1,8 @@
 // Shared types for the weir engine.
 
-import type { DockerStepSpec, LocalStepSpec } from './exec/runtime.ts';
+import type { DockerStepSpec, InferSchemaOutput, LocalStepSpec, StandardSchemaV1 } from './exec/runtime.ts';
 
-export type { DockerStepSpec } from './exec/runtime.ts';
+export type { DockerStepSpec, InferSchemaOutput, StandardSchemaV1 } from './exec/runtime.ts';
 export type { ExtractInput, Extractor } from './exec/runtime.ts';
 
 export type RunStatus =
@@ -116,7 +116,19 @@ export interface Ctx {
      *  the memo (`steps.image_digest`) — so a resumed run executes the exact bytes the first attempt did.
      *  Declaring `outputs` resolves to the module result paired with the content hashes those outputs
      *  snapshotted to. Requires docker: an unreachable daemon or an unpinnable image fails the step, with
-     *  no host fallback. `network: true` requires the `network` capability. */
+     *  no host fallback. `network: true` requires the `network` capability. A `schema` on the spec (any
+     *  Standard Schema v1 validator) is asserted against the result at the extract boundary and narrows
+     *  the return type to its output — a mismatch fails the step with the validator's issues. */
+    containerStep<S extends StandardSchemaV1>(
+        name: string,
+        spec: DockerStepSpecWithOutputs & { schema: S },
+        opts?: StepOpts<InferSchemaOutput<S>>,
+    ): Promise<ExecResult<InferSchemaOutput<S>>>;
+    containerStep<S extends StandardSchemaV1>(
+        name: string,
+        spec: DockerStepSpec & { schema: S },
+        opts?: StepOpts<InferSchemaOutput<S>>,
+    ): Promise<InferSchemaOutput<S>>;
     containerStep<T = unknown>(
         name: string,
         spec: DockerStepSpecWithOutputs,
@@ -169,6 +181,16 @@ export interface LoopCtx {
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
     /** The loop-scoped counterpart of {@link Ctx.containerStep}, sharing the same per-iteration
      *  `loop#L:i:name` keying as {@link LoopCtx.step}. */
+    containerStep<S extends StandardSchemaV1>(
+        name: string,
+        spec: DockerStepSpecWithOutputs & { schema: S },
+        opts?: StepOpts<InferSchemaOutput<S>>,
+    ): Promise<ExecResult<InferSchemaOutput<S>>>;
+    containerStep<S extends StandardSchemaV1>(
+        name: string,
+        spec: DockerStepSpec & { schema: S },
+        opts?: StepOpts<InferSchemaOutput<S>>,
+    ): Promise<InferSchemaOutput<S>>;
     containerStep<T = unknown>(
         name: string,
         spec: DockerStepSpecWithOutputs,
