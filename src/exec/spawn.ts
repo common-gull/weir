@@ -1,11 +1,11 @@
 // Runtime-agnostic subprocess runner for the container substrate. The caller supplies the command
-// line — a local bun shim in tests, a `docker run …` invocation later (C8) — and this module owns the
-// mechanics: marshal the C1 input frame to stdin, stream stderr log lines to `onLog`, collect the
+// line — a local bun shim in tests, a container `run …` invocation later (C8) — and this module owns
+// the mechanics: marshal the C1 input frame to stdin, stream stderr log lines to `onLog`, collect the
 // child's raw stdout, and keep the daemon alive by SIGKILLing a runaway child on an optional
 // wall-clock timeout or an output-size cap. `runProcess` hands back the raw `{ exitCode, stdout,
 // stderr }` for a host-side extractor to interpret (#50); `runProtocol` is the thin wrapper that
 // decodes that stdout as a C1 output frame — the default. It knows nothing about runtimes or
-// containers; argv construction (C3) and Docker wiring (C8) live elsewhere.
+// containers; argv construction (C3) and container wiring (C8) live elsewhere.
 //
 // Both of the child's pipes are bounded: stderr streams line-by-line — a newline-less line is flushed
 // once it crosses `maxStderrLineBytes`, so the parent's line buffer can't grow without bound — and
@@ -14,8 +14,9 @@
 //
 // The timeout is explicit-only: with no `timeoutMs` the runner arms no wall-clock timer, so the child
 // runs until it exits, is aborted via `signal`, or trips the output cap — matching a host closure
-// step, which has no implicit deadline either. A hard, kernel-enforced memory limit is Docker's job
-// (`--memory`, see buildDockerArgv), not this runner's — the old soft RSS poll is retired.
+// step, which has no implicit deadline either. A hard, kernel-enforced memory limit is the container
+// runtime's job (`--memory`, see buildContainerArgv), not this runner's — the old soft RSS poll is
+// retired.
 
 import { decodeProcessOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
 

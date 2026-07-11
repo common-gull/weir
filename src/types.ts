@@ -1,8 +1,8 @@
 // Shared types for the weir engine.
 
-import type { DockerStepSpec, InferSchemaOutput, LocalStepSpec, StandardSchemaV1 } from './exec/runtime.ts';
+import type { ContainerStepSpec, InferSchemaOutput, LocalStepSpec, StandardSchemaV1 } from './exec/runtime.ts';
 
-export type { DockerStepSpec, InferSchemaOutput, StandardSchemaV1 } from './exec/runtime.ts';
+export type { ContainerStepSpec, InferSchemaOutput, StandardSchemaV1 } from './exec/runtime.ts';
 export type { ExtractInput, Extractor } from './exec/runtime.ts';
 
 export type RunStatus =
@@ -18,7 +18,7 @@ export type RunStatus =
 export type StepStatus = 'completed' | 'failed' | 'discarded';
 
 /** What kind of ctx primitive produced a memo row. `container` is a `ctx.containerStep` dispatched to
- *  a digest-pinned `docker run`; `exec` is the retired rung-1 subprocess kind, kept for reading rows
+ *  a digest-pinned container `run`; `exec` is the retired rung-1 subprocess kind, kept for reading rows
  *  older runs wrote. */
 export type StepKind = 'step' | 'container' | 'exec' | 'now' | 'random' | 'uuid' | 'child' | 'approval' | 'once';
 
@@ -62,7 +62,7 @@ export type StepSpec = LocalStepSpec;
 /** A container spec that declares `outputs`: after the run, the engine snapshots each declared path
  *  from the step's scratch dir (bind-mounted at `/weir`) into the artifact store and hands the
  *  workflow an {@link ExecResult}. */
-export type DockerStepSpecWithOutputs = DockerStepSpec & { outputs: string[] };
+export type ContainerStepSpecWithOutputs = ContainerStepSpec & { outputs: string[] };
 
 /** A step's declared output path → the sha256 hash it was content-addressed to in the store. */
 export type StepArtifacts = Record<string, string>;
@@ -110,31 +110,32 @@ export interface Ctx {
      *  so a failed run resumes from it. This is the default surface for host-integration work. `step`
      *  takes a closure only — hand a spec to {@link Ctx.containerStep} to run out-of-process. */
     step<T>(name: string, fn: (s: StepCtx) => T | Promise<T>, opts?: StepOpts<T>): Promise<T>;
-    /** A container step: `ctx.containerStep(name, spec)` runs `spec` as a digest-pinned `docker run`
+    /** A container step: `ctx.containerStep(name, spec)` runs `spec` as a digest-pinned container `run`
      *  child that speaks the C1 stdio protocol, memoized/replayed/retried like any step. The image is
      *  resolved to its content `sha256` digest before it runs — the step's replay identity, recorded in
      *  the memo (`steps.image_digest`) — so a resumed run executes the exact bytes the first attempt did.
      *  Declaring `outputs` resolves to the module result paired with the content hashes those outputs
-     *  snapshotted to. Requires docker: an unreachable daemon or an unpinnable image fails the step, with
-     *  no host fallback. `network: true` requires the `network` capability. A `schema` on the spec (any
-     *  Standard Schema v1 validator) is asserted against the result at the extract boundary and narrows
-     *  the return type to its output — a mismatch fails the step with the validator's issues. */
+     *  snapshotted to. Requires a container runtime: an unreachable daemon or an unpinnable image fails
+     *  the step, with no host fallback. `network: true` requires the `network` capability. A `schema`
+     *  on the spec (any Standard Schema v1 validator) is asserted against the result at the extract
+     *  boundary and narrows the return type to its output — a mismatch fails the step with the
+     *  validator's issues. */
     containerStep<S extends StandardSchemaV1>(
         name: string,
-        spec: DockerStepSpecWithOutputs & { schema: S },
+        spec: ContainerStepSpecWithOutputs & { schema: S },
         opts?: StepOpts<InferSchemaOutput<S>>,
     ): Promise<ExecResult<InferSchemaOutput<S>>>;
     containerStep<S extends StandardSchemaV1>(
         name: string,
-        spec: DockerStepSpec & { schema: S },
+        spec: ContainerStepSpec & { schema: S },
         opts?: StepOpts<InferSchemaOutput<S>>,
     ): Promise<InferSchemaOutput<S>>;
     containerStep<T = unknown>(
         name: string,
-        spec: DockerStepSpecWithOutputs,
+        spec: ContainerStepSpecWithOutputs,
         opts?: StepOpts<T>,
     ): Promise<ExecResult<T>>;
-    containerStep<T = unknown>(name: string, spec: DockerStepSpec, opts?: StepOpts<T>): Promise<T>;
+    containerStep<T = unknown>(name: string, spec: ContainerStepSpec, opts?: StepOpts<T>): Promise<T>;
     loop<T>(opts: LoopOpts<T>, body: (it: LoopCtx) => T | Promise<T>): Promise<T>;
     /** Fan out `fn` over `items` with bounded concurrency, each invocation memoized as its own step.
      *  `fn` runs in-process on the host, like a closure {@link step}. */
@@ -183,20 +184,20 @@ export interface LoopCtx {
      *  `loop#L:i:name` keying as {@link LoopCtx.step}. */
     containerStep<S extends StandardSchemaV1>(
         name: string,
-        spec: DockerStepSpecWithOutputs & { schema: S },
+        spec: ContainerStepSpecWithOutputs & { schema: S },
         opts?: StepOpts<InferSchemaOutput<S>>,
     ): Promise<ExecResult<InferSchemaOutput<S>>>;
     containerStep<S extends StandardSchemaV1>(
         name: string,
-        spec: DockerStepSpec & { schema: S },
+        spec: ContainerStepSpec & { schema: S },
         opts?: StepOpts<InferSchemaOutput<S>>,
     ): Promise<InferSchemaOutput<S>>;
     containerStep<T = unknown>(
         name: string,
-        spec: DockerStepSpecWithOutputs,
+        spec: ContainerStepSpecWithOutputs,
         opts?: StepOpts<T>,
     ): Promise<ExecResult<T>>;
-    containerStep<T = unknown>(name: string, spec: DockerStepSpec, opts?: StepOpts<T>): Promise<T>;
+    containerStep<T = unknown>(name: string, spec: ContainerStepSpec, opts?: StepOpts<T>): Promise<T>;
 }
 
 export class SkipSignal {
@@ -236,7 +237,7 @@ export interface StepRow {
     child_run_id: string | null;
     /** JSON `{path: sha256}` map of artifacts a spec step snapshotted into the store, else null. */
     artifacts: string | null;
-    /** `sha256:…` image digest a docker exec step (#C8) was pinned to — its replay identity — else null. */
+    /** `sha256:…` image digest a container step (#C8) was pinned to — its replay identity — else null. */
     image_digest: string | null;
     created_at: number;
 }

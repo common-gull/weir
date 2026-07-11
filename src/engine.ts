@@ -16,13 +16,13 @@ import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
 import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
-import { pinnedImageRef, resolveImageDigest } from './exec/docker.ts';
+import { pinnedImageRef, resolveImageDigest } from './exec/image.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
 import {
-    buildDockerArgv,
-    dockerCapabilityMounts,
-    type DockerStepSpec,
-    dockerImageRef,
+    buildContainerArgv,
+    containerCapabilityMounts,
+    type ContainerStepSpec,
+    containerImageRef,
     type ExtractInput,
     extractResult,
     planOutputs,
@@ -435,14 +435,14 @@ function buildCtx(
         }));
     };
 
-    // Container step (rung-2): run the spec as a digest-pinned `docker run` child on the same spawn
+    // Container step (rung-2): run the spec as a digest-pinned container `run` child on the same spawn
     // seam as a host step, streaming its log lines to step.log like any step. The caller
     // (containerStepImpl) resolves the image digest and gates `network` ONCE per step and threads the
     // pinned `image` in here, so every retry/repeat attempt runs that one digest — the memo's replay
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
     // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — forwarded by name and
-    // used as the docker CLI's own env — and ambient capability mounts (dockerCapabilityMounts) ride
+    // used as the docker CLI's own env — and ambient capability mounts (containerCapabilityMounts) ride
     // along. Keying the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown
     // from racing a retry that stages inputs into the same path; it is torn down once outputs are stored.
     // Invoked as the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes
@@ -450,7 +450,7 @@ function buildCtx(
     async function runContainerStep(
         seq: number,
         attempt: number,
-        spec: DockerStepSpec,
+        spec: ContainerStepSpec,
         opts: StepOpts,
         image: string,
         signal: AbortSignal,
@@ -470,10 +470,10 @@ function buildCtx(
             await mkdir(scratch, { recursive: true });
             await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
             const raw = await runProcess({
-                argv: buildDockerArgv(spec, {
+                argv: buildContainerArgv(spec, {
                     scratch,
                     env,
-                    mounts: dockerCapabilityMounts(),
+                    mounts: containerCapabilityMounts(),
                     image,
                     runtime: containerRuntime,
                 }),
@@ -506,7 +506,7 @@ function buildCtx(
 
     const containerStepImpl = (
         name: string,
-        spec: DockerStepSpec,
+        spec: ContainerStepSpec,
         opts: StepOpts,
         keyOverride?: string,
     ): Promise<unknown> => {
@@ -541,7 +541,7 @@ function buildCtx(
                 async (s) => {
                     if (spec.network) requireCapability('network');
                     if (!pinned) {
-                        const ref = dockerImageRef(spec);
+                        const ref = containerImageRef(spec);
                         const digest = await resolveImageDigest(ref, containerRuntime);
                         pinned = { digest, image: pinnedImageRef(ref, digest) };
                     }
@@ -577,7 +577,7 @@ function buildCtx(
     // `keyOverride` as makeStepDispatch so a container step keys interchangeably with a closure step.
     const makeContainerDispatch =
         (keyOverride?: (name: string) => string) =>
-        (name: string, spec: DockerStepSpec, opts: StepOpts = {}): Promise<unknown> =>
+        (name: string, spec: ContainerStepSpec, opts: StepOpts = {}): Promise<unknown> =>
             containerStepImpl(name, spec, opts, keyOverride?.(name));
 
     const ctx: Ctx = {

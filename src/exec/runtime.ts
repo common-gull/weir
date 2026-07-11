@@ -3,8 +3,8 @@
 // the argv the C2 runner (src/exec/spawn.ts) executes. Rung-1 is a local process — a `runtime` names
 // a pinned language shim (src/exec/shims/*) that speaks the C1 protocol, so an author ships just a
 // module (`export default (input) => output` for node, `def step(input): return output` for python)
-// and weir wires the protocol around it. Rung-2 (buildDockerArgv, below) is a `docker run` on the
-// same spawn seam, with image-by-digest pinning in src/exec/docker.ts.
+// and weir wires the protocol around it. Rung-2 (buildContainerArgv, below) is a container `run` on
+// the same spawn seam, with image-by-digest pinning in src/exec/image.ts.
 
 import { $ } from 'bun';
 import { copyFile, lstat, mkdir, readdir, rm } from 'node:fs/promises';
@@ -125,14 +125,14 @@ function shimPath(name: string): string {
 }
 
 /** Resolve a step module path against the daemon cwd if it isn't already absolute, so both rungs
- *  hand the child (or the docker mount) a concrete absolute path. */
+ *  hand the child (or the container mount) a concrete absolute path. */
 function resolveModulePath(module: string): string {
     return isAbsolute(module) ? module : resolve(module);
 }
 
 /** How weir runs a runtime's protocol shim across the ladder — one record per runtime keeps the
  *  interpreter, shim filename, base image, and container module path in a single place, shared by the
- *  local (buildArgv) and docker (buildDockerArgv) mappings so the two rungs can't drift. */
+ *  local (buildArgv) and container (buildContainerArgv) mappings so the two rungs can't drift. */
 interface RuntimeSpec {
     /** Interpreter for the rung-1 local shim. Node runs on bun (always present, so CI stays green). */
     localExec: string;
@@ -146,7 +146,7 @@ interface RuntimeSpec {
      *  Its extension matches the runtime so the interpreter loads it as it would on the host. */
     moduleFile: string;
     /** Pinned weir base image for the runtime authoring form; dispatch (slice 4) resolves it to a
-     *  digest, mirroring how an image-form step is pinned (src/exec/docker.ts). */
+     *  digest, mirroring how an image-form step is pinned (src/exec/image.ts). */
     image: string;
 }
 
@@ -189,10 +189,10 @@ export function buildArgv(spec: LocalStepSpec): string[] {
     return [...shimArgv(spec.runtime), resolveModulePath(spec.module)];
 }
 
-// ---- rung-2: docker runtime (#C8) ----
+// ---- rung-2: container runtime (#C8) ----
 //
 // The container rung of the ladder. Same spawn seam as rung-1 — the C2 runner (src/exec/spawn.ts)
-// runs the argv and speaks the C1 protocol over the child's stdio — but the child is a `docker run`
+// runs the argv and speaks the C1 protocol over the child's stdio — but the child is a container `run`
 // rather than a local interpreter. A step is authored either as an explicit image + command (the
 // image speaks the protocol itself) or, ergonomically, as the same `{ runtime, module }` as rung-1 —
 // which maps to weir's pinned base image, bind-mounts the module read-only, and runs the shim baked
@@ -202,13 +202,13 @@ export function buildArgv(spec: LocalStepSpec): string[] {
 // lock for docker's default bridge — gated on the `network` capability in dispatch, not here.
 // Credentials reach it the same capability-scoped way rung-1 gets them (resolveExecEnv, #C7),
 // forwarded by name (`-e NAME`, so the value comes from the docker CLI's env and never lands on the
-// host process table); the image is pinned by digest (src/exec/docker.ts) so a replay runs the exact
+// host process table); the image is pinned by digest (src/exec/image.ts) so a replay runs the exact
 // bytes the first run did.
 
 /** A host→container bind mount. `readonly` maps to docker's `:ro` volume suffix; `relabel` maps to
  *  the SELinux relabel suffix (`private` → `Z`, `shared` → `z`), which relabels the host path so a
  *  container under an enforcing policy may access it — a no-op when SELinux is off. */
-export interface DockerMount {
+export interface ContainerMount {
     host: string;
     container: string;
     readonly?: boolean;
@@ -221,8 +221,8 @@ export interface DockerMount {
  *  container's plain interpreter can load them. */
 const CONTAINER_WEIR_DIR = '/opt/weir';
 
-/** Fields common to both docker authoring forms. */
-interface DockerStepCommon {
+/** Fields common to both container authoring forms. */
+interface ContainerStepCommon {
     /** Give the container the docker default bridge network instead of `--network none`. Taken
      *  verbatim by the builder; dispatch (slice 4) is where opting in requires the `network`
      *  capability, so this stays a pure argv function. */
@@ -247,7 +247,7 @@ interface DockerStepCommon {
 }
 
 /** A container step run by an explicit image + command: the image already speaks the C1 protocol. */
-export interface DockerImageSpec extends DockerStepCommon {
+export interface ContainerImageSpec extends ContainerStepCommon {
     /** Image reference to run. Pin it by digest (`name@sha256:…`, see resolveImageDigest) so a
      *  replay runs the exact image the first run did rather than whatever the tag now points at. */
     image: string;
@@ -259,36 +259,36 @@ export interface DockerImageSpec extends DockerStepCommon {
 /** A container step authored the rung-1 way — a `runtime` + `module` — but run in a container. weir
  *  supplies the pinned base image for the runtime, bind-mounts the module read-only, and invokes the
  *  shim baked into the image, so an author ships just a module and needs no protocol-aware image. */
-export interface DockerRuntimeSpec extends DockerStepCommon {
+export interface ContainerRuntimeSpec extends ContainerStepCommon {
     runtime: Runtime;
     /** Host path to the author's step module; a relative path resolves against the daemon cwd (as
      *  buildArgv does for a local step), then is bind-mounted read-only into the container. */
     module: string;
 }
 
-export type DockerStepSpec = DockerImageSpec | DockerRuntimeSpec;
+export type ContainerStepSpec = ContainerImageSpec | ContainerRuntimeSpec;
 
 /** Render a bind mount as docker's `-v host:container[:opts]` value, composing the volume options —
  *  `ro` for a read-only mount, then the SELinux relabel suffix (`Z` private / `z` shared) — as a
  *  comma-joined list. Both docker and podman honor these, and the relabel suffix is a no-op when
  *  SELinux is off, so a mount that needs one can set it unconditionally. */
-function mountArg(m: DockerMount): string {
+function mountArg(m: ContainerMount): string {
     const opts: string[] = [];
     if (m.readonly) opts.push('ro');
     if (m.relabel) opts.push(m.relabel === 'private' ? 'Z' : 'z');
     return opts.length > 0 ? `${m.host}:${m.container}:${opts.join(',')}` : `${m.host}:${m.container}`;
 }
 
-/** Resolve a docker spec's runtime concern — the image, its command tail, and any weir-supplied
- *  mounts — so buildDockerArgv assembles one argv shape for both authoring forms. The image form runs
+/** Resolve a container spec's runtime concern — the image, its command tail, and any weir-supplied
+ *  mounts — so buildContainerArgv assembles one argv shape for both authoring forms. The image form runs
  *  `image` + `cmd` as given; the runtime form maps to the pinned base image, mounts the module
  *  read-only at a fixed path, and runs the baked shim on it (`<exec> /opt/weir/<shim> <module>`),
  *  mirroring the rung-1 `<exec> <shim> <module>` local mapping. Module and image reach the argv only
  *  as array elements — never interpolated into a shell string. */
-function resolveDockerSpec(spec: DockerStepSpec): { image: string; cmd: string[]; mounts: DockerMount[] } {
+function resolveContainerSpec(spec: ContainerStepSpec): { image: string; cmd: string[]; mounts: ContainerMount[] } {
     if ('runtime' in spec) {
         if (typeof spec.module !== 'string' || spec.module.length === 0) {
-            throw new Error(`docker step runtime '${spec.runtime}' requires a module path`);
+            throw new Error(`container step runtime '${spec.runtime}' requires a module path`);
         }
         const { containerExec, shim, moduleFile, image } = runtimeSpec(spec.runtime);
         const host = resolveModulePath(spec.module);
@@ -300,29 +300,36 @@ function resolveDockerSpec(spec: DockerStepSpec): { image: string; cmd: string[]
         };
     }
     if (typeof spec.image !== 'string' || spec.image.length === 0) {
-        throw new Error('docker step requires an image reference');
+        throw new Error('container step requires an image reference');
     }
     return { image: spec.image, cmd: spec.cmd ?? [], mounts: [] };
 }
 
-/** Build the `docker run` argv for a container step, in either authoring form (image+cmd, or
- *  runtime+module — see resolveDockerSpec). Pure: the per-step scratch dir (bind-mounted at /weir),
+/** Build the container `run` argv for a container step, in either authoring form (image+cmd, or
+ *  runtime+module — see resolveContainerSpec). Pure: the per-step scratch dir (bind-mounted at /weir),
  *  the capability-scoped env (from resolveExecEnv, #C7, forwarded by name as `-e NAME` so values stay
  *  off the host process table), any extra mounts (e.g. the claude capability's ~/.claude, see
- *  dockerCapabilityMounts), and the runtime binary used as argv[0] (`opts.runtime`, defaulting to
+ *  containerCapabilityMounts), and the runtime binary used as argv[0] (`opts.runtime`, defaulting to
  *  `docker` — any docker-CLI-compatible binary like podman/nerdctl) are all passed in, so the whole
- *  argv is a deterministic function of its inputs and unit-testable without Docker. Defaults to
- *  `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped container, and keeps
- *  stdin open so its C1 input frame reaches the module. A `network: true` spec drops `--network none`
- *  for docker's default bridge; the flag is taken verbatim, its capability gate living in dispatch
- *  (slice 4) so this stays pure. A `memory` spec adds a kernel-enforced `--memory` cap. */
-export function buildDockerArgv(
-    spec: DockerStepSpec,
-    opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[]; image?: string; runtime?: string },
+ *  argv is a deterministic function of its inputs and unit-testable without a container runtime.
+ *  Defaults to `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped container,
+ *  and keeps stdin open so its C1 input frame reaches the module. A `network: true` spec drops
+ *  `--network none` for docker's default bridge; the flag is taken verbatim, its capability gate
+ *  living in dispatch (slice 4) so this stays pure. A `memory` spec adds a kernel-enforced `--memory`
+ *  cap. */
+export function buildContainerArgv(
+    spec: ContainerStepSpec,
+    opts: {
+        scratch: string;
+        env?: Record<string, string>;
+        mounts?: ContainerMount[];
+        image?: string;
+        runtime?: string;
+    },
 ): string[] {
     const runtime = opts.runtime ?? 'docker';
-    const { image: resolvedImage, cmd, mounts: specMounts } = resolveDockerSpec(spec);
-    // Dispatch resolves the image to a content digest (src/exec/docker.ts) and hands the pinned ref
+    const { image: resolvedImage, cmd, mounts: specMounts } = resolveContainerSpec(spec);
+    // Dispatch resolves the image to a content digest (src/exec/image.ts) and hands the pinned ref
     // back here, so the argv runs the exact bytes it recorded in the memo. Absent it, run the tag.
     const image = opts.image ?? resolvedImage;
     // The scratch mount is relabeled `private` (`:Z`): under SELinux enforcing, a container runs as
@@ -330,7 +337,7 @@ export function buildDockerArgv(
     // container is root and owns the dir), so a step declaring outputs or writable inputs can't write
     // /weir without it. Unconfined host domains aren't bound by the MCS category `:Z` pins, so the
     // host daemon still reads the outputs back. A no-op when SELinux is off, so it's set always.
-    const mounts: DockerMount[] = [
+    const mounts: ContainerMount[] = [
         { host: opts.scratch, container: '/weir', relabel: 'private' },
         ...specMounts,
         ...(opts.mounts ?? []),
@@ -355,12 +362,12 @@ export function buildDockerArgv(
     return [runtime, 'run', '--rm', '-i', ...networkArgs, ...memoryArgs, ...mountArgs, ...envArgs, image, ...cmd];
 }
 
-/** The image reference a docker step runs before digest-pinning — the runtime form's pinned base
+/** The image reference a container step runs before digest-pinning — the runtime form's pinned base
  *  image (`weir-node` / `weir-python`) or the image form's named image. Dispatch resolves this to a
- *  content digest and passes it back as buildDockerArgv's `image` override, so both authoring forms
+ *  content digest and passes it back as buildContainerArgv's `image` override, so both authoring forms
  *  run — and record — the exact pinned bytes. */
-export function dockerImageRef(spec: DockerStepSpec): string {
-    return resolveDockerSpec(spec).image;
+export function containerImageRef(spec: ContainerStepSpec): string {
+    return resolveContainerSpec(spec).image;
 }
 
 /** Extra bind mounts a step's *ambient* capabilities open into its container, mirroring how
@@ -369,9 +376,9 @@ export function dockerImageRef(spec: DockerStepSpec): string {
  *  deliberately longer-lived hole (host credentials cross the isolation boundary) the capability
  *  gates. The mount is read-only: the login only needs to be read, and a writable path back to
  *  ~/.claude would let a compromised image plant a settings.json hook or rewrite credentials on the
- *  host. Kept separate from buildDockerArgv so that stays a pure function of its arguments. */
-export function dockerCapabilityMounts(): DockerMount[] {
-    const mounts: DockerMount[] = [];
+ *  host. Kept separate from buildContainerArgv so that stays a pure function of its arguments. */
+export function containerCapabilityMounts(): ContainerMount[] {
+    const mounts: ContainerMount[] = [];
     if (hasCapability('claude'))
         mounts.push({ host: join(homedir(), '.claude'), container: '/root/.claude', readonly: true });
     return mounts;
