@@ -127,6 +127,40 @@ test('the network flag defaults off, keeping --network none', () => {
     expect(runtime.slice(4, 6)).toEqual(['--network', 'none']);
 });
 
+// ---- buildDockerArgv: memory limit (#62) ----
+
+test('a numeric memory limit maps to --memory in bytes, after the network lockdown args', () => {
+    const bytes = 512 * 1024 * 1024;
+    const argv = buildDockerArgv({ image: 'img', memory: bytes }, { scratch: '/s' });
+    const i = argv.indexOf('--memory');
+    expect(i).toBeGreaterThan(-1);
+    expect(argv[i + 1]).toBe(String(bytes));
+    // The network lockdown still occupies indices 4-5, so the existing slice-based assertions hold.
+    expect(argv.slice(4, 6)).toEqual(['--network', 'none']);
+});
+
+test('a memory limit pins --memory-swap to the same value so swap cannot double the cap', () => {
+    const bytes = 512 * 1024 * 1024;
+    const argv = buildDockerArgv({ image: 'img', memory: bytes }, { scratch: '/s' });
+    const s = argv.indexOf('--memory-swap');
+    expect(s).toBeGreaterThan(-1);
+    expect(argv[s + 1]).toBe(String(bytes));
+});
+
+test('a string memory limit is passed to docker verbatim (its own unit syntax)', () => {
+    const argv = buildDockerArgv({ runtime: 'node', module: '/a/s.ts', memory: '512m' }, { scratch: '/s' });
+    const i = argv.indexOf('--memory');
+    expect(argv[i + 1]).toBe('512m');
+    const s = argv.indexOf('--memory-swap');
+    expect(argv[s + 1]).toBe('512m');
+});
+
+test('no --memory flag when the spec declares no limit', () => {
+    const argv = buildDockerArgv({ image: 'img' }, { scratch: '/s' });
+    expect(argv).not.toContain('--memory');
+    expect(argv).not.toContain('--memory-swap');
+});
+
 test('image and module reach the argv as standalone elements, never shell-interpolated', () => {
     // A host module path carrying shell metacharacters stays a single `-v` element; the injection
     // boundary is the argv array, so it is never spliced into a command string.

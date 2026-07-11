@@ -158,8 +158,17 @@ test('input JSON a frame can not carry is rejected before spawning', async () =>
     await expect(runProtocol({ argv, input: { cb: () => {} }, timeoutMs: 10_000 })).rejects.toThrow(/function/);
 });
 
-test('a runaway allocation is SIGKILLed by the RSS memory cap', async () => {
-    await expect(
-        runProtocol({ argv, input: { mode: 'oom' }, memoryMb: 128, pollMs: 100, timeoutMs: 20_000 }),
-    ).rejects.toThrow(/exceeded 128MB/);
-}, 25_000);
+test('with no timeoutMs, no wall-clock timer is armed: a slow child runs to completion', async () => {
+    // The former implicit 30s SIGKILL is gone (#62) — omitting timeoutMs arms no timer, so a child that
+    // takes its time still delivers its frame. A container step inherits this: with no opts.timeout it
+    // runs unbounded, matching a host closure step.
+    const out = await runProtocol({ argv, input: { mode: 'slow', ms: 1200 } });
+    expect(out).toEqual({ ok: true, result: 'slow-done' });
+});
+
+test('an explicit timeoutMs still SIGKILLs a child that outlives it', async () => {
+    // The timer is conditional, not removed: a supplied deadline is honored exactly as before.
+    await expect(runProtocol({ argv, input: { mode: 'slow', ms: 10_000 }, timeoutMs: 300 })).rejects.toThrow(
+        /timed out after 300ms/,
+    );
+});

@@ -466,8 +466,10 @@ function buildCtx(
                 argv: buildDockerArgv(spec, { scratch, env, mounts: dockerCapabilityMounts(), image }),
                 input: opts.input,
                 env,
+                // No spawn-level timeout: the deadline is `opts.timeout`, enforced by the shared attempt
+                // wrapper (runStepBody), which aborts `signal` — SIGKILLing this child — when it fires. So a
+                // container step with no declared timeout runs unbounded, exactly like a host closure step.
                 signal,
-                timeoutMs: opts.timeout,
                 onLog: (f) => emit(db, { runId, seq, type: 'step.log', level: f.level, message: f.message }),
             });
             // A container spec carries no `extract`, so the raw output is always decoded as a C1 output
