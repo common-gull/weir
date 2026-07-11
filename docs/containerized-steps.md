@@ -116,7 +116,8 @@ can read and write only its own staged inputs and outputs, nothing else of the h
 
 ## Container runtime portability
 
-The container rung isn't hardwired to the `docker` binary. `ctx.containerStep` runs on any
+The container rung isn't hardwired to the `docker` binary. Its argv builder and digest pinning — the
+machinery `ctx.containerStep` will dispatch to once it lands (above) — run on any
 docker-CLI-compatible runtime: set **`WEIR_CONTAINER_RUNTIME`** (default `docker`) to point weir at
 `podman` or `nerdctl` — no `docker` symlink needed. The configured binary is threaded as `argv[0]` for
 both halves of a container run — the `run` itself (`buildContainerArgv`, `src/exec/runtime.ts`) and the
