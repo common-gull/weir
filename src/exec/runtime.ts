@@ -205,11 +205,14 @@ export function buildArgv(spec: LocalStepSpec): string[] {
 // host process table); the image is pinned by digest (src/exec/docker.ts) so a replay runs the exact
 // bytes the first run did.
 
-/** A host→container bind mount. `readonly` maps to docker's `:ro` volume suffix. */
+/** A host→container bind mount. `readonly` maps to docker's `:ro` volume suffix; `relabel` maps to
+ *  the SELinux relabel suffix (`private` → `Z`, `shared` → `z`), which relabels the host path so a
+ *  container under an enforcing policy may access it — a no-op when SELinux is off. */
 export interface DockerMount {
     host: string;
     container: string;
     readonly?: boolean;
+    relabel?: 'private' | 'shared';
 }
 
 /** Fixed base directory inside every weir base image: the protocol shim is baked here and a
@@ -265,9 +268,15 @@ export interface DockerRuntimeSpec extends DockerStepCommon {
 
 export type DockerStepSpec = DockerImageSpec | DockerRuntimeSpec;
 
-/** Render a bind mount as docker's `-v host:container[:ro]` value. */
+/** Render a bind mount as docker's `-v host:container[:opts]` value, composing the volume options —
+ *  `ro` for a read-only mount, then the SELinux relabel suffix (`Z` private / `z` shared) — as a
+ *  comma-joined list. Both docker and podman honor these, and the relabel suffix is a no-op when
+ *  SELinux is off, so a mount that needs one can set it unconditionally. */
 function mountArg(m: DockerMount): string {
-    return `${m.host}:${m.container}${m.readonly ? ':ro' : ''}`;
+    const opts: string[] = [];
+    if (m.readonly) opts.push('ro');
+    if (m.relabel) opts.push(m.relabel === 'private' ? 'Z' : 'z');
+    return opts.length > 0 ? `${m.host}:${m.container}:${opts.join(',')}` : `${m.host}:${m.container}`;
 }
 
 /** Resolve a docker spec's runtime concern — the image, its command tail, and any weir-supplied
@@ -314,7 +323,16 @@ export function buildDockerArgv(
     // Dispatch resolves the image to a content digest (src/exec/docker.ts) and hands the pinned ref
     // back here, so the argv runs the exact bytes it recorded in the memo. Absent it, run the tag.
     const image = opts.image ?? resolvedImage;
-    const mounts: DockerMount[] = [{ host: opts.scratch, container: '/weir' }, ...specMounts, ...(opts.mounts ?? [])];
+    // The scratch mount is relabeled `private` (`:Z`): under SELinux enforcing, a container runs as
+    // `container_t` and is denied the scratch dir's default label (a hard deny even though the
+    // container is root and owns the dir), so a step declaring outputs or writable inputs can't write
+    // /weir without it. Unconfined host domains aren't bound by the MCS category `:Z` pins, so the
+    // host daemon still reads the outputs back. A no-op when SELinux is off, so it's set always.
+    const mounts: DockerMount[] = [
+        { host: opts.scratch, container: '/weir', relabel: 'private' },
+        ...specMounts,
+        ...(opts.mounts ?? []),
+    ];
     const mountArgs = mounts.flatMap((m) => ['-v', mountArg(m)]);
     // `-e NAME` (name only) forwards each value from the docker CLI's own environment, which the
     // spawn seam sets to this same resolved env. Emitting `-e NAME=VALUE` instead would leak secrets

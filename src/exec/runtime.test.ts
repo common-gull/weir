@@ -71,7 +71,7 @@ test('the node runtime form maps to the weir base image and runs the baked shim 
         '--network',
         'none',
         '-v',
-        '/scratch/7:/weir',
+        '/scratch/7:/weir:Z',
         '-v',
         '/abs/step.ts:/opt/weir/module.ts:ro',
         'weir-node',
@@ -117,7 +117,7 @@ test('network:true drops --network none for the docker default bridge (image for
     // the rest of the lockdown defaults are untouched.
     expect(argv.slice(0, 4)).toEqual(['docker', 'run', '--rm', '-i']);
     expect(argv).toContain('-v');
-    expect(argv).toContain('/s:/weir');
+    expect(argv).toContain('/s:/weir:Z');
 });
 
 test('network:true drops --network none for the runtime form too', () => {
@@ -130,6 +130,27 @@ test('the network flag defaults off, keeping --network none', () => {
     const runtime = buildDockerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/s' });
     expect(image.slice(4, 6)).toEqual(['--network', 'none']);
     expect(runtime.slice(4, 6)).toEqual(['--network', 'none']);
+});
+
+// ---- buildDockerArgv: SELinux relabel of the scratch mount (#78) ----
+
+test('the scratch mount carries the SELinux :Z relabel in both authoring forms', () => {
+    // Under SELinux enforcing the container is denied the scratch dir's default label, so /weir must
+    // be relabeled or a step declaring outputs/writable inputs can't write it. A no-op when off.
+    const image = buildDockerArgv({ image: 'img' }, { scratch: '/scratch/7' });
+    const runtime = buildDockerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/scratch/7' });
+    expect(image).toContain('/scratch/7:/weir:Z');
+    expect(runtime).toContain('/scratch/7:/weir:Z');
+});
+
+test('a read-only mount that also relabels composes the options as :ro,z', () => {
+    // mountArg comma-joins the volume options in order — `ro` then the relabel suffix — so an extra
+    // mount carrying both renders `:ro,z` rather than dropping or reordering either.
+    const argv = buildDockerArgv(
+        { image: 'img' },
+        { scratch: '/s', mounts: [{ host: '/data', container: '/data', readonly: true, relabel: 'shared' }] },
+    );
+    expect(argv).toContain('/data:/data:ro,z');
 });
 
 // ---- buildDockerArgv: memory limit (#62) ----

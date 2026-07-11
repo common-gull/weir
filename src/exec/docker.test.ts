@@ -20,7 +20,7 @@ test('buildDockerArgv defaults to no network and mounts the scratch dir at /weir
         '--network',
         'none',
         '-v',
-        '/scratch/run/3:/weir',
+        '/scratch/run/3:/weir:Z',
         'weir-base:node',
     ]);
 });
@@ -31,7 +31,7 @@ test('buildDockerArgv forwards env by name as -e NAME and appends the cmd after 
         { image, cmd: ['python3', '/weir/step.py'] },
         { scratch: '/s', env: { GH_TOKEN: 'secret', PATH: '/usr/bin' } },
     );
-    expect(argv.slice(0, 8)).toEqual(['docker', 'run', '--rm', '-i', '--network', 'none', '-v', '/s:/weir']);
+    expect(argv.slice(0, 8)).toEqual(['docker', 'run', '--rm', '-i', '--network', 'none', '-v', '/s:/weir:Z']);
     const eIdx = argv.indexOf('-e');
     // name-only references — docker reads the value from its own env, so no secret lands in argv.
     expect(argv.slice(eIdx, eIdx + 4)).toEqual(['-e', 'GH_TOKEN', '-e', 'PATH']);
@@ -51,7 +51,7 @@ test('buildDockerArgv adds extra mounts, read-only ones with a :ro suffix', () =
             ],
         },
     ).join(' ');
-    expect(flat).toContain('-v /s:/weir');
+    expect(flat).toContain('-v /s:/weir:Z');
     expect(flat).toContain('-v /home/u/.claude:/root/.claude');
     expect(flat).toContain('-v /data:/data:ro');
 });
