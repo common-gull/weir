@@ -41,6 +41,71 @@ export interface ExtractInput {
  *  targeting a stock image supplies one to bridge its native output. */
 export type Extractor = (raw: ExtractInput) => unknown | Promise<unknown>;
 
+// ---- boundary schema validation (#64) ----
+//
+// The extractor's return crosses back from an untrusted, out-of-process step into the control plane.
+// An optional `schema` on a container spec asserts that value matches a declared shape *once*, on the
+// trusted side, right where it re-enters. It accepts any Standard Schema v1 validator (zod/valibot/
+// arktype and friends all expose the structural `~standard` interface below), so weir validates
+// against whichever library a workflow already uses — no new dependency, no adapter.
+
+/** The Standard Schema v1 contract (https://standardschema.dev): the structural `~standard` interface
+ *  zod, valibot, arktype, and others all expose. Only the members weir uses are typed. */
+export interface StandardSchemaV1<Input = unknown, Output = Input> {
+    readonly '~standard': {
+        readonly version: 1;
+        readonly vendor: string;
+        readonly validate: (value: unknown) => StandardSchemaResult<Output> | Promise<StandardSchemaResult<Output>>;
+        /** Phantom types (absent at runtime) carrying the validator's input/output shapes. */
+        readonly types?: { readonly input: Input; readonly output: Output } | undefined;
+    };
+}
+
+/** A validation outcome: `issues` present means failure; absent means `value` is the validated result. */
+export type StandardSchemaResult<Output> =
+    | { readonly value: Output; readonly issues?: undefined }
+    | { readonly issues: ReadonlyArray<StandardSchemaIssue> };
+
+export interface StandardSchemaIssue {
+    readonly message: string;
+    readonly path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }> | undefined;
+}
+
+/** The output type a Standard Schema validator narrows to — the `T` a schema-bearing step returns. */
+export type InferSchemaOutput<S extends StandardSchemaV1> = NonNullable<S['~standard']['types']>['output'];
+
+/** Run a Standard Schema validator at the extract boundary: return the validated value, or throw with
+ *  the validator's issues (each rendered `path: message`) so a mismatch fails the step with text that
+ *  points at what was wrong. */
+export async function validateWithSchema(schema: StandardSchemaV1, value: unknown): Promise<unknown> {
+    const result = await schema['~standard'].validate(value);
+    if (result.issues) {
+        const detail = result.issues
+            .map((issue) => {
+                // A path segment is a raw key or a `{ key }` object; String() also renders a symbol key
+                // (a template literal would throw on one).
+                const path = issue.path?.map((seg) => String(typeof seg === 'object' ? seg.key : seg)).join('.');
+                return path ? `${path}: ${issue.message}` : issue.message;
+            })
+            .join('; ');
+        throw new Error(`schema validation failed: ${detail}`);
+    }
+    return result.value;
+}
+
+/** Normalize a container step's raw process output into its result at the trust boundary: run the
+ *  spec's `extract` (falling back to `decode`, the C1 frame decoder, passed in to keep this module free
+ *  of the protocol layer), then, if the spec declares a `schema`, validate the extracted value — a
+ *  mismatch throws before the result re-enters the control plane. */
+export async function extractResult(
+    spec: { extract?: Extractor; schema?: StandardSchemaV1 },
+    raw: ExtractInput,
+    decode: Extractor,
+): Promise<unknown> {
+    const extracted = await (spec.extract ?? decode)(raw);
+    return spec.schema ? validateWithSchema(spec.schema, extracted) : extracted;
+}
+
 export interface LocalStepSpec {
     runtime: Runtime;
     /** Path to the author's step module; a relative path resolves against the daemon cwd so the
@@ -166,6 +231,16 @@ interface DockerStepCommon {
     memory?: number | string;
     inputs?: ArtifactInput[];
     outputs?: string[];
+    /** Host-side output normalizer (#50), the container-rung counterpart of {@link LocalStepSpec.extract}:
+     *  omitted, the container's stdout is decoded as a C1 output frame (the default); provide one to adapt
+     *  an image whose process emits something else natively. It runs in the trusted control plane after the
+     *  container exits, receiving the declared outputs' `path -> hash` map in `raw.artifacts`. */
+    extract?: Extractor;
+    /** Boundary validator (#64) — any Standard Schema v1 implementation (zod/valibot/arktype) — run on the
+     *  extractor's return, the point where the container's out-of-process output re-enters the control
+     *  plane. A mismatch fails the step with the validator's issues; a pass narrows the step's result type
+     *  to the schema's output (see the `ctx.containerStep` overloads). */
+    schema?: StandardSchemaV1;
 }
 
 /** A container step run by an explicit image + command: the image already speaks the C1 protocol. */
