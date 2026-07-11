@@ -11,7 +11,7 @@ import { knownCapabilities, unknownCapabilities } from './capabilities.ts';
 import { loadWorkflows } from './loader.ts';
 import { approveRun, createRun, retryRun } from './runs.ts';
 import { loadConfig, type WeirConfig } from './config.ts';
-import { doctor } from './doctor.ts';
+import { doctor, toolsForRuntime } from './doctor.ts';
 
 function makeExecutor(db: DB, cfg: WeirConfig): Executor {
     return new Executor(db, {
@@ -24,7 +24,7 @@ function makeExecutor(db: DB, cfg: WeirConfig): Executor {
 }
 
 async function cmdStart(cfg: WeirConfig): Promise<void> {
-    const health = await doctor();
+    const health = await doctor(toolsForRuntime(cfg.containerRuntime), cfg.containerRuntime);
     console.log(health.lines.join('\n'));
     if (!health.ok) {
         console.error('doctor: required tools missing — aborting.');
@@ -237,7 +237,7 @@ async function main() {
             return cmdRuns(cfg);
         // biome-ignore lint/suspicious/noFallthroughSwitchClause: process.exit() below is terminal
         case 'doctor': {
-            const r = await doctor();
+            const r = await doctor(toolsForRuntime(cfg.containerRuntime), cfg.containerRuntime);
             console.log(r.lines.join('\n'));
             // Capability validation needs the registry populated, so load workflows (and their
             // helper imports) first, then flag any declared-but-undeclared capabilities.
