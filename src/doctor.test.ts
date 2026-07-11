@@ -27,8 +27,10 @@ test('the configured container runtime is appended as an optional check', () => 
 });
 
 test('doctor reports the configured runtime by name', async () => {
-    // Absent-but-named keeps this host-independent: doctor still names the runtime it checked.
-    const r = await doctor(toolsForRuntime('podman'), 'podman');
+    // Absent-but-named keeps this host-independent: doctor names the runtime it checked, and an
+    // absent *optional* runtime never flips ok. A runtime-only list keeps the ok assertion from
+    // hinging on which required host tools (e.g. claude) happen to be installed on the test host.
+    const r = await doctor([{ cmd: 'podman', versionArg: '--version', required: false }], 'podman');
     expect(r.ok).toBe(true);
     expect(r.lines.some((l) => l.includes('podman'))).toBe(true);
 });
