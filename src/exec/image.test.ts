@@ -4,17 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveExecEnv, withCapabilities } from '../capabilities.ts';
 import type { Capability } from '../types.ts';
-import { parseRepoDigest, pinnedImageRef, resolveImageDigest } from './docker.ts';
-import { buildDockerArgv, dockerCapabilityMounts, dockerImageRef } from './runtime.ts';
+import { parseRepoDigest, pinnedImageRef, resolveImageDigest } from './image.ts';
+import { buildContainerArgv, containerCapabilityMounts, containerImageRef } from './runtime.ts';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const withCaps = <T>(caps: Capability[], fn: () => T): T =>
     withCapabilities({ workflow: 'wf', caps: new Set(caps) }, fn);
 
-// ---- buildDockerArgv (pure argv assembly) ----
+// ---- buildContainerArgv (pure argv assembly) ----
 
-test('buildDockerArgv defaults to no network and mounts the scratch dir at /weir', () => {
-    const argv = buildDockerArgv({ image: 'weir-base:node' }, { scratch: '/scratch/run/3' });
+test('buildContainerArgv defaults to no network and mounts the scratch dir at /weir', () => {
+    const argv = buildContainerArgv({ image: 'weir-base:node' }, { scratch: '/scratch/run/3' });
     expect(argv).toEqual([
         'docker',
         'run',
@@ -28,9 +28,9 @@ test('buildDockerArgv defaults to no network and mounts the scratch dir at /weir
     ]);
 });
 
-test('buildDockerArgv forwards env by name as -e NAME and appends the cmd after the image', () => {
+test('buildContainerArgv forwards env by name as -e NAME and appends the cmd after the image', () => {
     const image = `img@${DIGEST}`;
-    const argv = buildDockerArgv(
+    const argv = buildContainerArgv(
         { image, cmd: ['python3', '/weir/step.py'] },
         { scratch: '/s', env: { GH_TOKEN: 'secret', PATH: '/usr/bin' } },
     );
@@ -43,8 +43,8 @@ test('buildDockerArgv forwards env by name as -e NAME and appends the cmd after 
     expect(argv.slice(-3)).toEqual([image, 'python3', '/weir/step.py']);
 });
 
-test('buildDockerArgv adds extra mounts, read-only ones with a :ro suffix', () => {
-    const flat = buildDockerArgv(
+test('buildContainerArgv adds extra mounts, read-only ones with a :ro suffix', () => {
+    const flat = buildContainerArgv(
         { image: 'img' },
         {
             scratch: '/s',
@@ -59,31 +59,31 @@ test('buildDockerArgv adds extra mounts, read-only ones with a :ro suffix', () =
     expect(flat).toContain('-v /data:/data:ro');
 });
 
-test('buildDockerArgv rejects a missing image', () => {
-    expect(() => buildDockerArgv({ image: '' }, { scratch: '/s' })).toThrow(/requires an image/);
+test('buildContainerArgv rejects a missing image', () => {
+    expect(() => buildContainerArgv({ image: '' }, { scratch: '/s' })).toThrow(/requires an image/);
 });
 
-test('buildDockerArgv runs the `image` override (a pinned digest) in place of the resolved image', () => {
+test('buildContainerArgv runs the `image` override (a pinned digest) in place of the resolved image', () => {
     // Dispatch pins the runtime form's base image to a digest and hands it back via `image`; the
     // module still bind-mounts at /opt/weir, but the container runs the exact pinned bytes.
     const pinned = `weir-node@${DIGEST}`;
-    const argv = buildDockerArgv({ runtime: 'node', module: '/w/step.ts' }, { scratch: '/s', image: pinned });
+    const argv = buildContainerArgv({ runtime: 'node', module: '/w/step.ts' }, { scratch: '/s', image: pinned });
     expect(argv).toContain(pinned);
     expect(argv).not.toContain('weir-node');
     // the module mount survives the override
     expect(argv.join(' ')).toContain('/w/step.ts:/opt/weir/module.ts:ro');
 });
 
-test('dockerImageRef returns the named image for the image form and the base image for the runtime form', () => {
-    expect(dockerImageRef({ image: 'alpine:3.20' })).toBe('alpine:3.20');
-    expect(dockerImageRef({ runtime: 'node', module: '/w/step.ts' })).toBe('weir-node');
-    expect(dockerImageRef({ runtime: 'python', module: '/w/step.py' })).toBe('weir-python');
+test('containerImageRef returns the named image for the image form and the base image for the runtime form', () => {
+    expect(containerImageRef({ image: 'alpine:3.20' })).toBe('alpine:3.20');
+    expect(containerImageRef({ runtime: 'node', module: '/w/step.ts' })).toBe('weir-node');
+    expect(containerImageRef({ runtime: 'python', module: '/w/step.py' })).toBe('weir-python');
 });
 
 test('cap-scoped env from resolveExecEnv flows into the docker argv (C7)', () => {
     const source = { PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' };
     const env = withCaps(['gh-pr'], () => resolveExecEnv(source));
-    const flat = buildDockerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
+    const flat = buildContainerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
     // gh-pr authorizes GH_TOKEN; PATH is the operational baseline; UNRELATED is neither → withheld.
     // Forwarded by name, so the secret value never appears in the argv.
     expect(flat).toContain('-e GH_TOKEN');
@@ -100,22 +100,22 @@ test('a container step declaring no credential capability carries no daemon secr
     // fails alongside the capabilities.test.ts gate.
     const source = { PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' };
     const env = withCaps([], () => resolveExecEnv(source));
-    const flat = buildDockerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
+    const flat = buildContainerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
     expect(flat).not.toContain('GH_TOKEN');
     expect(flat).not.toContain('ghs_secret');
     expect(flat).not.toContain('UNRELATED');
     expect(flat).toContain('-e PATH');
 });
 
-// ---- dockerCapabilityMounts (ambient capability → mounts) ----
+// ---- containerCapabilityMounts (ambient capability → mounts) ----
 
-test('dockerCapabilityMounts is empty without the claude capability', () => {
-    const mounts = withCaps([], dockerCapabilityMounts);
+test('containerCapabilityMounts is empty without the claude capability', () => {
+    const mounts = withCaps([], containerCapabilityMounts);
     expect(mounts).toEqual([]);
 });
 
 test('the claude capability mounts ~/.claude read-only into the container', () => {
-    const mounts = withCaps(['claude'], dockerCapabilityMounts);
+    const mounts = withCaps(['claude'], containerCapabilityMounts);
     expect(mounts).toHaveLength(1);
     expect(mounts[0]?.container).toBe('/root/.claude');
     expect(mounts[0]?.host.endsWith('.claude')).toBe(true);

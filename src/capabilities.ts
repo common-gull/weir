@@ -98,8 +98,8 @@ defineCapability('network', 'make arbitrary outbound network requests (self-gate
 // token the daemon holds — so instead we hand the child a minimal env built from its ambient grants:
 // only the credential vars its declared capabilities name, plus a tiny operational baseline. A step
 // that declares no credential capability therefore sees none of the daemon's secrets. This is the
-// process runtime's only isolation lever; network-namespace isolation and secret mounts are Docker's
-// (C8).
+// process runtime's only isolation lever; network-namespace isolation and secret mounts are the
+// container runtime's (C8).
 
 /** Each capability → the daemon env vars it authorizes forwarding to a step's subprocess. A
  *  capability not listed here (e.g. network) contributes no credentials of its own. */
@@ -113,7 +113,7 @@ const CAP_ENV: Partial<Record<Capability, readonly string[]>> = {
  *  None names a credential, so forwarding them leaks no grant — but existing steps rely on them, and
  *  withholding them silently changes behavior rather than protecting a secret (the child already runs
  *  as the daemon's user with full filesystem access — the process runtime has no fs sandbox, that's
- *  Docker's job, C8 — so withholding any of these only breaks tooling). Specifically:
+ *  the container runtime's job, C8 — so withholding any of these only breaks tooling). Specifically:
  *  - PATH: without it the runtime interpreter (bun/python3) can't even be located.
  *  - HOME: git/ssh and the runtimes resolve their per-user config and caches through it — ~/.gitconfig
  *    (user identity, credential.helper, the safe.directory allowlist git now requires),

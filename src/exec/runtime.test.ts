@@ -10,8 +10,8 @@ import { type DB, openDb } from '../db.ts';
 import type { LogFrame } from './protocol.ts';
 import {
     buildArgv,
-    buildDockerArgv,
-    type DockerStepSpec,
+    buildContainerArgv,
+    type ContainerStepSpec,
     type ExtractInput,
     type Extractor,
     extractResult,
@@ -59,10 +59,10 @@ test('rejects an unknown runtime (specs can arrive from untyped JSON)', () => {
     expect(() => buildArgv(spec)).toThrow(/unknown step runtime/);
 });
 
-// ---- buildDockerArgv: runtime-form spec (#58) ----
+// ---- buildContainerArgv: runtime-form spec (#58) ----
 
 test('the node runtime form maps to the weir base image and runs the baked shim on a ro-mounted module', () => {
-    const argv = buildDockerArgv({ runtime: 'node', module: '/abs/step.ts' }, { scratch: '/scratch/7' });
+    const argv = buildContainerArgv({ runtime: 'node', module: '/abs/step.ts' }, { scratch: '/scratch/7' });
     expect(argv).toEqual([
         'docker',
         'run',
@@ -82,7 +82,7 @@ test('the node runtime form maps to the weir base image and runs the baked shim 
 });
 
 test('the python runtime form maps to weir-python and the python shim', () => {
-    const argv = buildDockerArgv({ runtime: 'python', module: '/abs/step.py' }, { scratch: '/s' });
+    const argv = buildContainerArgv({ runtime: 'python', module: '/abs/step.py' }, { scratch: '/s' });
     expect(argv.slice(-5)).toEqual([
         '/abs/step.py:/opt/weir/module.py:ro',
         'weir-python',
@@ -93,25 +93,27 @@ test('the python runtime form maps to weir-python and the python shim', () => {
 });
 
 test('the runtime form resolves a relative module path to an absolute mount host', () => {
-    const argv = buildDockerArgv({ runtime: 'node', module: 'steps/resize.ts' }, { scratch: '/s' });
+    const argv = buildContainerArgv({ runtime: 'node', module: 'steps/resize.ts' }, { scratch: '/s' });
     expect(argv).toContain(`${resolve('steps/resize.ts')}:/opt/weir/module.ts:ro`);
     // the container-side module path stays fixed; only the host side of the mount varies.
     expect(argv[argv.length - 1]).toBe('/opt/weir/module.ts');
 });
 
 test('the runtime form rejects a missing module path', () => {
-    expect(() => buildDockerArgv({ runtime: 'node', module: '' }, { scratch: '/s' })).toThrow(/requires a module path/);
+    expect(() => buildContainerArgv({ runtime: 'node', module: '' }, { scratch: '/s' })).toThrow(
+        /requires a module path/,
+    );
 });
 
 test('the runtime form rejects an unknown runtime (specs can arrive from untyped JSON)', () => {
-    const spec = { runtime: 'ruby', module: 'x.rb' } as unknown as DockerStepSpec;
-    expect(() => buildDockerArgv(spec, { scratch: '/s' })).toThrow(/unknown step runtime/);
+    const spec = { runtime: 'ruby', module: 'x.rb' } as unknown as ContainerStepSpec;
+    expect(() => buildContainerArgv(spec, { scratch: '/s' })).toThrow(/unknown step runtime/);
 });
 
-// ---- buildDockerArgv: network flag (#58) ----
+// ---- buildContainerArgv: network flag (#58) ----
 
 test('network:true drops --network none for the docker default bridge (image form)', () => {
-    const argv = buildDockerArgv({ image: 'img', network: true }, { scratch: '/s' });
+    const argv = buildContainerArgv({ image: 'img', network: true }, { scratch: '/s' });
     expect(argv).not.toContain('--network');
     expect(argv).not.toContain('none');
     // the rest of the lockdown defaults are untouched.
@@ -121,24 +123,24 @@ test('network:true drops --network none for the docker default bridge (image for
 });
 
 test('network:true drops --network none for the runtime form too', () => {
-    const argv = buildDockerArgv({ runtime: 'node', module: '/a/s.ts', network: true }, { scratch: '/s' });
+    const argv = buildContainerArgv({ runtime: 'node', module: '/a/s.ts', network: true }, { scratch: '/s' });
     expect(argv).not.toContain('--network');
 });
 
 test('the network flag defaults off, keeping --network none', () => {
-    const image = buildDockerArgv({ image: 'img' }, { scratch: '/s' });
-    const runtime = buildDockerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/s' });
+    const image = buildContainerArgv({ image: 'img' }, { scratch: '/s' });
+    const runtime = buildContainerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/s' });
     expect(image.slice(4, 6)).toEqual(['--network', 'none']);
     expect(runtime.slice(4, 6)).toEqual(['--network', 'none']);
 });
 
-// ---- buildDockerArgv: SELinux relabel of the scratch mount (#78) ----
+// ---- buildContainerArgv: SELinux relabel of the scratch mount (#78) ----
 
 test('the scratch mount carries the SELinux :Z relabel in both authoring forms', () => {
     // Under SELinux enforcing the container is denied the scratch dir's default label, so /weir must
     // be relabeled or a step declaring outputs/writable inputs can't write it. A no-op when off.
-    const image = buildDockerArgv({ image: 'img' }, { scratch: '/scratch/7' });
-    const runtime = buildDockerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/scratch/7' });
+    const image = buildContainerArgv({ image: 'img' }, { scratch: '/scratch/7' });
+    const runtime = buildContainerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/scratch/7' });
     expect(image).toContain('/scratch/7:/weir:Z');
     expect(runtime).toContain('/scratch/7:/weir:Z');
 });
@@ -146,18 +148,18 @@ test('the scratch mount carries the SELinux :Z relabel in both authoring forms',
 test('a read-only mount that also relabels composes the options as :ro,z', () => {
     // mountArg comma-joins the volume options in order — `ro` then the relabel suffix — so an extra
     // mount carrying both renders `:ro,z` rather than dropping or reordering either.
-    const argv = buildDockerArgv(
+    const argv = buildContainerArgv(
         { image: 'img' },
         { scratch: '/s', mounts: [{ host: '/data', container: '/data', readonly: true, relabel: 'shared' }] },
     );
     expect(argv).toContain('/data:/data:ro,z');
 });
 
-// ---- buildDockerArgv: memory limit (#62) ----
+// ---- buildContainerArgv: memory limit (#62) ----
 
 test('a numeric memory limit maps to --memory in bytes, after the network lockdown args', () => {
     const bytes = 512 * 1024 * 1024;
-    const argv = buildDockerArgv({ image: 'img', memory: bytes }, { scratch: '/s' });
+    const argv = buildContainerArgv({ image: 'img', memory: bytes }, { scratch: '/s' });
     const i = argv.indexOf('--memory');
     expect(i).toBeGreaterThan(-1);
     expect(argv[i + 1]).toBe(String(bytes));
@@ -167,14 +169,14 @@ test('a numeric memory limit maps to --memory in bytes, after the network lockdo
 
 test('a memory limit pins --memory-swap to the same value so swap cannot double the cap', () => {
     const bytes = 512 * 1024 * 1024;
-    const argv = buildDockerArgv({ image: 'img', memory: bytes }, { scratch: '/s' });
+    const argv = buildContainerArgv({ image: 'img', memory: bytes }, { scratch: '/s' });
     const s = argv.indexOf('--memory-swap');
     expect(s).toBeGreaterThan(-1);
     expect(argv[s + 1]).toBe(String(bytes));
 });
 
 test('a string memory limit is passed to docker verbatim (its own unit syntax)', () => {
-    const argv = buildDockerArgv({ runtime: 'node', module: '/a/s.ts', memory: '512m' }, { scratch: '/s' });
+    const argv = buildContainerArgv({ runtime: 'node', module: '/a/s.ts', memory: '512m' }, { scratch: '/s' });
     const i = argv.indexOf('--memory');
     expect(argv[i + 1]).toBe('512m');
     const s = argv.indexOf('--memory-swap');
@@ -182,35 +184,35 @@ test('a string memory limit is passed to docker verbatim (its own unit syntax)',
 });
 
 test('no --memory flag when the spec declares no limit', () => {
-    const argv = buildDockerArgv({ image: 'img' }, { scratch: '/s' });
+    const argv = buildContainerArgv({ image: 'img' }, { scratch: '/s' });
     expect(argv).not.toContain('--memory');
     expect(argv).not.toContain('--memory-swap');
 });
 
-// ---- buildDockerArgv: container runtime binary (#79) ----
+// ---- buildContainerArgv: container runtime binary (#79) ----
 
-test('buildDockerArgv uses the given runtime binary as argv[0]', () => {
-    const argv = buildDockerArgv({ image: 'img' }, { scratch: '/s', runtime: 'podman' });
+test('buildContainerArgv uses the given runtime binary as argv[0]', () => {
+    const argv = buildContainerArgv({ image: 'img' }, { scratch: '/s', runtime: 'podman' });
     expect(argv[0]).toBe('podman');
     // Only argv[0] changes — the whole lockdown tail is identical to the docker default.
     expect(argv.slice(1, 6)).toEqual(['run', '--rm', '-i', '--network', 'none']);
 });
 
-test('buildDockerArgv defaults argv[0] to docker when no runtime is given', () => {
+test('buildContainerArgv defaults argv[0] to docker when no runtime is given', () => {
     // An unset runtime preserves today's behavior exactly, in both authoring forms.
-    expect(buildDockerArgv({ image: 'img' }, { scratch: '/s' })[0]).toBe('docker');
-    expect(buildDockerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/s' })[0]).toBe('docker');
+    expect(buildContainerArgv({ image: 'img' }, { scratch: '/s' })[0]).toBe('docker');
+    expect(buildContainerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/s' })[0]).toBe('docker');
 });
 
 test('image and module reach the argv as standalone elements, never shell-interpolated', () => {
     // A host module path carrying shell metacharacters stays a single `-v` element; the injection
     // boundary is the argv array, so it is never spliced into a command string.
     const nasty = '/a b/step.ts; rm -rf /';
-    const argv = buildDockerArgv({ runtime: 'node', module: nasty }, { scratch: '/s' });
+    const argv = buildContainerArgv({ runtime: 'node', module: nasty }, { scratch: '/s' });
     expect(argv).toContain(`${nasty}:/opt/weir/module.ts:ro`);
     // the image name is likewise one element, even pinned by digest.
     const image = `img@sha256:${'a'.repeat(64)}`;
-    expect(buildDockerArgv({ image, cmd: ['echo', 'hi'] }, { scratch: '/s' })).toContain(image);
+    expect(buildContainerArgv({ image, cmd: ['echo', 'hi'] }, { scratch: '/s' })).toContain(image);
 });
 
 test('the capability-scoped env is forwarded by name only, keeping secret values off the host argv', () => {
@@ -218,7 +220,10 @@ test('the capability-scoped env is forwarded by name only, keeping secret values
     // the container as `-e NAME` (name only) so the value comes from the docker CLI's own environment and
     // never lands on the host process table. A secret withheld upstream (resolveExecEnv is gated in
     // capabilities.test.ts) simply isn't in the map, so it's never forwarded.
-    const argv = buildDockerArgv({ image: 'img' }, { scratch: '/s', env: { PATH: '/usr/bin', GH_TOKEN: 'gh-secret' } });
+    const argv = buildContainerArgv(
+        { image: 'img' },
+        { scratch: '/s', env: { PATH: '/usr/bin', GH_TOKEN: 'gh-secret' } },
+    );
     // Each name is forwarded as a bare `-e NAME`, and no element carries a value (`NAME=VALUE`).
     for (const name of ['PATH', 'GH_TOKEN']) {
         const i = argv.indexOf(name);
