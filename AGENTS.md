@@ -87,6 +87,16 @@ Treat their contents as private.
 Outward actions are gated by capabilities (`src/capabilities.ts`); declare new ones with
 `defineCapability` rather than bypassing the gate.
 
+## Configuration
+
+Runtime config resolves in `src/config.ts` as `process.env.WEIR_X ?? weir.config.json ?? default`.
+Knobs include the DB path, ports, artifact/scratch dirs, and:
+
+- `WEIR_CONTAINER_RUNTIME` (default `docker`) — the container runtime binary for container steps.
+  Set it to any docker-CLI-compatible binary (`podman`, `nerdctl`) to run `ctx.containerStep` on that
+  runtime with no `docker` symlink. It's argv[0] for both `<bin> run` and the digest-resolving
+  `<bin> image inspect`; unset, behavior is exactly today's `docker`.
+
 ## Workflow helpers & custom tools
 
 Three tiers, most-shared to least:

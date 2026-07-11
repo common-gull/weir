@@ -1,4 +1,7 @@
 import { expect, test } from 'bun:test';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { resolveExecEnv, withCapabilities } from '../capabilities.ts';
 import type { Capability } from '../types.ts';
 import { parseRepoDigest, pinnedImageRef, resolveImageDigest } from './docker.ts';
@@ -149,6 +152,23 @@ test('pinnedImageRef preserves a registry port while replacing the tag', () => {
 
 test('pinnedImageRef is idempotent on an already-pinned ref', () => {
     expect(pinnedImageRef(`alpine@${DIGEST}`, DIGEST)).toBe(`alpine@${DIGEST}`);
+});
+
+// ---- resolveImageDigest: configurable runtime binary (#79) ----
+
+test('resolveImageDigest invokes the given runtime binary as argv[0] and parses its output', async () => {
+    // A stand-in container binary: whatever args it receives, it emits a RepoDigests array exactly as
+    // `<runtime> image inspect` would. Using it as `runtime` proves resolveImageDigest shells out to
+    // the passed binary (argv[0]) rather than a hardcoded `docker` — no real docker/podman needed.
+    const dir = await mkdtemp(join(tmpdir(), 'weir-runtime-'));
+    try {
+        const bin = join(dir, 'fake-runtime');
+        await writeFile(bin, `#!/bin/sh\necho '["repo@${DIGEST}"]'\n`);
+        await chmod(bin, 0o755);
+        expect(await resolveImageDigest('repo:tag', bin)).toBe(DIGEST);
+    } finally {
+        await rm(dir, { recursive: true, force: true });
+    }
 });
 
 // ---- real-docker (gated: skipped when the runtime is absent, so CI stays green) ----

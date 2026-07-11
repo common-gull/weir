@@ -187,6 +187,21 @@ test('no --memory flag when the spec declares no limit', () => {
     expect(argv).not.toContain('--memory-swap');
 });
 
+// ---- buildDockerArgv: container runtime binary (#79) ----
+
+test('buildDockerArgv uses the given runtime binary as argv[0]', () => {
+    const argv = buildDockerArgv({ image: 'img' }, { scratch: '/s', runtime: 'podman' });
+    expect(argv[0]).toBe('podman');
+    // Only argv[0] changes — the whole lockdown tail is identical to the docker default.
+    expect(argv.slice(1, 6)).toEqual(['run', '--rm', '-i', '--network', 'none']);
+});
+
+test('buildDockerArgv defaults argv[0] to docker when no runtime is given', () => {
+    // An unset runtime preserves today's behavior exactly, in both authoring forms.
+    expect(buildDockerArgv({ image: 'img' }, { scratch: '/s' })[0]).toBe('docker');
+    expect(buildDockerArgv({ runtime: 'node', module: '/a/s.ts' }, { scratch: '/s' })[0]).toBe('docker');
+});
+
 test('image and module reach the argv as standalone elements, never shell-interpolated', () => {
     // A host module path carrying shell metacharacters stays a single `-v` element; the injection
     // boundary is the argv array, so it is never spliced into a command string.
