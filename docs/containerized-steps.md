@@ -64,7 +64,7 @@ is not reachable from a workflow yet.** What ships today is a transitional `Step
 `ctx.step` that routes only to **rung 1**: `ctx.step(name, spec)`, dispatched by `typeof` (a function is
 a host closure, an object is a spec). That `StepSpec` is the local `{ runtime, module }` form only — it
 carries no `image`, `cmd`, or `network` field — so a docker spec handed to `ctx.step` is a type error,
-not a container step. The rung-2 machinery above (`src/exec/runtime.ts`, `src/exec/docker.ts`) is built
+not a container step. The rung-2 machinery above (`src/exec/runtime.ts`, `src/exec/image.ts`) is built
 and unit-tested against the design this section describes, but nothing dispatches to it until
 `ctx.containerStep` wires it in. Inside `ctx.loop`, `it.step` takes the same two forms with the loop's
 per-iteration keying.
@@ -74,7 +74,7 @@ The container rung is built on four properties, each a lever a workflow can reas
 ### Digest-pinned replay
 
 An image reference is resolved to its canonical `sha256:…` content digest before it runs
-(`src/exec/docker.ts`) and the digest is recorded in the step's memo row (`steps.image_digest`) — the
+(`src/exec/image.ts`) and the digest is recorded in the step's memo row (`steps.image_digest`) — the
 same artifact-hash-in-memo discipline the scratch store uses. That digest is the step's replay
 identity: a resumed run executes the exact image bytes the first attempt did, even if the tag has since
 moved. weir reads the digest from an already-present image rather than pulling, so pinning never touches
@@ -113,6 +113,36 @@ beforehand, and declared output paths are snapshotted back into it afterward, ea
 sha256 and returned to the workflow as a `path -> hash` map (also recorded in the memo). Every declared
 path is confined to the scratch dir — a `..` or absolute path that escapes it is refused — so a module
 can read and write only its own staged inputs and outputs, nothing else of the host.
+
+## Container runtime portability
+
+The container rung isn't hardwired to the `docker` binary. `ctx.containerStep` runs on any
+docker-CLI-compatible runtime: set **`WEIR_CONTAINER_RUNTIME`** (default `docker`) to point weir at
+`podman` or `nerdctl` — no `docker` symlink needed. The configured binary is threaded as `argv[0]` for
+both halves of a container run — the `run` itself (`buildContainerArgv`, `src/exec/runtime.ts`) and the
+digest-resolving `image inspect` that pins the image (`resolveImageDigest`, `src/exec/image.ts`). Left
+unset, the runtime binary is `docker`, exactly as before the knob existed.
+
+This is a *validated target*, not a transparent multi-runtime abstraction — podman is a supported binary
+weir accounts for where it diverges from docker, not a drop-in weir pretends is docker:
+
+- **SELinux relabel.** The per-step scratch dir is bind-mounted with the `:Z` (private) relabel suffix,
+  so under an enforcing policy a container running as `container_t` may write `/weir` — otherwise a hard
+  deny, even though the container is root and owns the dir. The suffix is a no-op when SELinux is off, so
+  weir always sets it, and podman honors it exactly as docker does (see `mountArg` in
+  `src/exec/runtime.ts`).
+- **Local-image digests.** Pinning reads a `RepoDigests` entry; an image built locally and never pushed
+  or pulled has none, so it can't be pinned reproducibly and the step fails rather than run unpinned.
+  podman populates `RepoDigests` for locally-built images differently than docker — one reason it's
+  treated as a specific supported binary rather than an interchangeable one.
+- **Rootless userns.** podman's rootless user-namespace mapping shifts container-side file ownership; a
+  module that reasons about uid/gid on its staged inputs or outputs should account for it.
+
+`weir doctor` checks the *configured* runtime and **nudges rather than auto-falls-back**: if
+`WEIR_CONTAINER_RUNTIME` names a binary that isn't installed but a known alternative (`podman`,
+`nerdctl`, `docker`) is, doctor points you at `WEIR_CONTAINER_RUNTIME=<alt>` so you opt in explicitly —
+weir never silently switches the runtime under you (`src/doctor.ts`, surfaced by the startup preflight
+and the `weir doctor` command).
 
 ## Host-side output extractors
 
