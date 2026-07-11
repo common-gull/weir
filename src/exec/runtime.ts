@@ -249,8 +249,12 @@ export function buildDockerArgv(
     const networkArgs = spec.network ? [] : ['--network', 'none'];
     // A declared memory limit becomes a kernel-enforced `--memory` cgroup cap (a number is bytes; a
     // string like '512m' is docker's own unit syntax), the hard replacement for the runner's soft RSS
-    // poll. Emitted after the network args so the existing lockdown slices stay stable.
-    const memoryArgs = spec.memory === undefined ? [] : ['--memory', String(spec.memory)];
+    // poll. `--memory-swap` is pinned to the same value: without it docker defaults swap to 2x memory,
+    // so a container could quietly double the declared cap by thrashing swap instead of being
+    // OOM-killed. Equal values disable swap entirely, making the ceiling actually hard. Emitted after
+    // the network args so the existing lockdown slices stay stable.
+    const memoryArgs =
+        spec.memory === undefined ? [] : ['--memory', String(spec.memory), '--memory-swap', String(spec.memory)];
     // `-i` keeps the container's stdin open and forwarded so the module can read its C1 input frame;
     // without it docker closes stdin immediately and every containerized step sees EOF instead.
     return ['docker', 'run', '--rm', '-i', ...networkArgs, ...memoryArgs, ...mountArgs, ...envArgs, image, ...cmd];

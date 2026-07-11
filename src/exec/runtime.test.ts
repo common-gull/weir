@@ -139,14 +139,26 @@ test('a numeric memory limit maps to --memory in bytes, after the network lockdo
     expect(argv.slice(4, 6)).toEqual(['--network', 'none']);
 });
 
+test('a memory limit pins --memory-swap to the same value so swap cannot double the cap', () => {
+    const bytes = 512 * 1024 * 1024;
+    const argv = buildDockerArgv({ image: 'img', memory: bytes }, { scratch: '/s' });
+    const s = argv.indexOf('--memory-swap');
+    expect(s).toBeGreaterThan(-1);
+    expect(argv[s + 1]).toBe(String(bytes));
+});
+
 test('a string memory limit is passed to docker verbatim (its own unit syntax)', () => {
     const argv = buildDockerArgv({ runtime: 'node', module: '/a/s.ts', memory: '512m' }, { scratch: '/s' });
     const i = argv.indexOf('--memory');
     expect(argv[i + 1]).toBe('512m');
+    const s = argv.indexOf('--memory-swap');
+    expect(argv[s + 1]).toBe('512m');
 });
 
 test('no --memory flag when the spec declares no limit', () => {
-    expect(buildDockerArgv({ image: 'img' }, { scratch: '/s' })).not.toContain('--memory');
+    const argv = buildDockerArgv({ image: 'img' }, { scratch: '/s' });
+    expect(argv).not.toContain('--memory');
+    expect(argv).not.toContain('--memory-swap');
 });
 
 test('image and module reach the argv as standalone elements, never shell-interpolated', () => {
