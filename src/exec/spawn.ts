@@ -1,24 +1,23 @@
 // Runtime-agnostic subprocess runner for the container substrate. The caller supplies the command
 // line — a local bun shim in tests, a `docker run …` invocation later (C8) — and this module owns the
 // mechanics: marshal the C1 input frame to stdin, stream stderr log lines to `onLog`, collect the
-// child's raw stdout, and keep the daemon alive by SIGKILLing a runaway child on a hard timeout, an
-// output-size cap, or an optional RSS cap. `runProcess` hands back the raw `{ exitCode, stdout, stderr }`
-// for a host-side extractor to interpret (#50); `runProtocol` is the thin wrapper that decodes that
-// stdout as a C1 output frame — the default. It knows nothing about runtimes or containers; argv
-// construction (C3) and Docker wiring (C8) live elsewhere.
+// child's raw stdout, and keep the daemon alive by SIGKILLing a runaway child on an optional
+// wall-clock timeout or an output-size cap. `runProcess` hands back the raw `{ exitCode, stdout,
+// stderr }` for a host-side extractor to interpret (#50); `runProtocol` is the thin wrapper that
+// decodes that stdout as a C1 output frame — the default. It knows nothing about runtimes or
+// containers; argv construction (C3) and Docker wiring (C8) live elsewhere.
 //
-// Both of the child's pipes are bounded, not just its RSS: stderr streams line-by-line — a
-// newline-less line is flushed once it crosses `maxStderrLineBytes`, so the parent's line buffer
-// can't grow without bound — and stdout is read against `maxOutputBytes`. The RSS poll alone can't
-// catch a child that streams unbounded output without retaining it — its own resident memory stays
-// low while it buffers the parent toward an OOM — so the daemon caps both pipes directly.
+// Both of the child's pipes are bounded: stderr streams line-by-line — a newline-less line is flushed
+// once it crosses `maxStderrLineBytes`, so the parent's line buffer can't grow without bound — and
+// stdout is read against `maxOutputBytes`, so a child that streams unbounded output without retaining
+// it can't buffer the parent toward an OOM even while its own resident memory stays low.
 //
-// The RSS poll (readRssBytes, in ./rss.ts) is a soft, portable memory cap — reactive, not
-// kernel-enforced — that trades a hard guarantee for uniform behavior across OSes, the right call for
-// buggy, not hostile, code. A real kernel-enforced limit is Docker's job (C8).
+// The timeout is explicit-only: with no `timeoutMs` the runner arms no wall-clock timer, so the child
+// runs until it exits, is aborted via `signal`, or trips the output cap — matching a host closure
+// step, which has no implicit deadline either. A hard, kernel-enforced memory limit is Docker's job
+// (`--memory`, see buildDockerArgv), not this runner's — the old soft RSS poll is retired.
 
 import { decodeProcessOutput, encodeInput, type LogFrame, type OutputFrame, parseLogLine } from './protocol.ts';
-import { readRssBytes } from './rss.ts';
 
 const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_STDERR_LINE_BYTES = 1024 * 1024;
@@ -33,14 +32,12 @@ export interface RunProtocolOpts {
     input: unknown;
     /** Aborts the run and SIGKILLs the child; the returned promise rejects with the signal's reason. */
     signal?: AbortSignal;
-    /** Hard wall-clock limit before SIGKILL (default 30s). */
+    /** Hard wall-clock limit before SIGKILL. Omitted, no timer is armed and the child runs until it
+     *  exits on its own, is aborted via `signal`, or trips the output cap — matching a host closure
+     *  step, which has no implicit deadline either. */
     timeoutMs?: number;
-    /** Soft RSS cap in MB; when the child's resident memory crosses it, SIGKILL. */
-    memoryMb?: number;
-    /** RSS poll interval when `memoryMb` is set (default 150ms). */
-    pollMs?: number;
-    /** Hard cap on total stdout bytes before SIGKILL (default 16 MiB). Bounds the output frame the
-     *  RSS cap can't: a child that streams output without retaining it stays under `memoryMb`. */
+    /** Hard cap on total stdout bytes before SIGKILL (default 16 MiB), so an unbounded producer can't
+     *  buffer the parent into an OOM. */
     maxOutputBytes?: number;
     /** Per-line cap on the stderr buffer (default 1 MiB). A newline-less line is flushed once it
      *  crosses this, so a runaway or adversarial child can't grow the parent's buffer without bound. */
@@ -164,11 +161,11 @@ export interface ProcessResult {
 
 /** Spawn `argv`, marshal the C1 input frame to stdin, and return the child's raw `{ exitCode, stdout,
  *  stderr }` — leaving interpretation to the caller's extractor. Rejects only when the child is
- *  forcibly stopped: SIGKILLed on the timeout, RSS cap, or output-size cap, or aborted via `signal`. A
- *  plain non-zero exit is NOT an error here — it's a raw material the extractor decides on. */
+ *  forcibly stopped: SIGKILLed on an explicit timeout or the output-size cap, or aborted via `signal`.
+ *  A plain non-zero exit is NOT an error here — it's a raw material the extractor decides on. */
 export async function runProcess(opts: RunProtocolOpts): Promise<ProcessResult> {
-    const { argv, input, signal, memoryMb, onLog } = opts;
-    const timeoutMs = opts.timeoutMs ?? 30_000;
+    const { argv, input, signal, onLog } = opts;
+    const timeoutMs = opts.timeoutMs;
     const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     const maxStderrLineBytes = opts.maxStderrLineBytes ?? DEFAULT_MAX_STDERR_LINE_BYTES;
 
@@ -185,20 +182,17 @@ export async function runProcess(opts: RunProtocolOpts): Promise<ProcessResult> 
         /* the child may have exited before reading stdin */
     }
 
-    let killed: 'timeout' | 'memory' | 'abort' | 'output' | null = null;
-    const timer = setTimeout(() => {
-        killed = 'timeout';
-        proc.kill(9);
-    }, timeoutMs);
-    const memoryBytes = (memoryMb ?? 0) * 1024 * 1024;
-    const poll = memoryMb
-        ? setInterval(() => {
-              if (readRssBytes(proc.pid) > memoryBytes) {
-                  killed = 'memory';
+    let killed: 'timeout' | 'abort' | 'output' | null = null;
+    // Explicit-only: with no timeoutMs the child gets no wall-clock deadline (a hung child is still
+    // stopped by `signal` or the output cap). The engine leans on this — a container step's deadline is
+    // its `opts.timeout`, enforced by the shared attempt wrapper via `signal`, not a default baked here.
+    const timer =
+        timeoutMs === undefined
+            ? undefined
+            : setTimeout(() => {
+                  killed = 'timeout';
                   proc.kill(9);
-              }
-          }, opts.pollMs ?? 150)
-        : undefined;
+              }, timeoutMs);
     const onAbort = () => {
         killed = 'abort';
         proc.kill(9);
@@ -230,8 +224,8 @@ export async function runProcess(opts: RunProtocolOpts): Promise<ProcessResult> 
             proc.kill(9);
         });
         // Freeze the kill cause the instant we hold the complete stdout frame. A kill that only trips
-        // during the exit/stderr drain below — a deadline reached under event-loop lag, an abort, an RSS
-        // poll firing after the child already flushed a valid frame — must not turn that success into a
+        // during the exit/stderr drain below — a deadline reached under event-loop lag, or an abort
+        // firing after the child already flushed a valid frame — must not turn that success into a
         // spurious failure. The guards stay armed (cleared in `finally`), so a child that closes stdout
         // without exiting is still SIGKILLed by the timeout rather than awaited forever.
         const killCause = killed;
@@ -239,7 +233,6 @@ export async function runProcess(opts: RunProtocolOpts): Promise<ProcessResult> 
         await stderrDone;
 
         if (killCause === 'timeout') throw new Error(`protocol runner timed out after ${timeoutMs}ms (killed)`);
-        if (killCause === 'memory') throw new Error(`protocol runner exceeded ${memoryMb}MB (killed)`);
         if (killCause === 'output') {
             throw new Error(`protocol runner produced more than ${maxOutputBytes} bytes of output (killed)`);
         }
@@ -249,8 +242,7 @@ export async function runProcess(opts: RunProtocolOpts): Promise<ProcessResult> 
         // Guarantee no orphan survives an untracked stream error (e.g. reader.read() throwing for a
         // reason none of the `killed` causes cover); a no-op once the child has already exited.
         proc.kill(9);
-        clearTimeout(timer);
-        if (poll) clearInterval(poll);
+        if (timer) clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);
     }
 }

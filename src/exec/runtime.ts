@@ -159,6 +159,11 @@ interface DockerStepCommon {
      *  verbatim by the builder; dispatch (slice 4) is where opting in requires the `network`
      *  capability, so this stays a pure argv function. */
     network?: boolean;
+    /** Hard memory ceiling for the container, mapped to `docker run --memory`. A number is bytes; a
+     *  string is docker's own unit syntax (`'512m'`, `'2g'`) and is passed verbatim. The kernel
+     *  (cgroup) enforces it — the container is OOM-killed at the limit — so this is the real,
+     *  kernel-backed replacement for the runner's retired soft RSS poll. */
+    memory?: number | string;
     inputs?: ArtifactInput[];
     outputs?: string[];
 }
@@ -224,7 +229,8 @@ function resolveDockerSpec(spec: DockerStepSpec): { image: string; cmd: string[]
  *  inputs and unit-testable without Docker. Defaults to `--network none`, `--rm`, and `-i`: a step
  *  gets no egress, leaves no stopped container, and keeps stdin open so its C1 input frame reaches the
  *  module. A `network: true` spec drops `--network none` for docker's default bridge; the flag is
- *  taken verbatim, its capability gate living in dispatch (slice 4) so this stays pure. */
+ *  taken verbatim, its capability gate living in dispatch (slice 4) so this stays pure. A `memory`
+ *  spec adds a kernel-enforced `--memory` cap. */
 export function buildDockerArgv(
     spec: DockerStepSpec,
     opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[]; image?: string },
@@ -241,9 +247,13 @@ export function buildDockerArgv(
     const envArgs = Object.keys(opts.env ?? {}).flatMap((k) => ['-e', k]);
     // Locked to `--network none` (no egress) unless the spec opts into docker's default bridge.
     const networkArgs = spec.network ? [] : ['--network', 'none'];
+    // A declared memory limit becomes a kernel-enforced `--memory` cgroup cap (a number is bytes; a
+    // string like '512m' is docker's own unit syntax), the hard replacement for the runner's soft RSS
+    // poll. Emitted after the network args so the existing lockdown slices stay stable.
+    const memoryArgs = spec.memory === undefined ? [] : ['--memory', String(spec.memory)];
     // `-i` keeps the container's stdin open and forwarded so the module can read its C1 input frame;
     // without it docker closes stdin immediately and every containerized step sees EOF instead.
-    return ['docker', 'run', '--rm', '-i', ...networkArgs, ...mountArgs, ...envArgs, image, ...cmd];
+    return ['docker', 'run', '--rm', '-i', ...networkArgs, ...memoryArgs, ...mountArgs, ...envArgs, image, ...cmd];
 }
 
 /** The image reference a docker step runs before digest-pinning — the runtime form's pinned base

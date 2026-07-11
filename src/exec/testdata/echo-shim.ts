@@ -1,5 +1,5 @@
 // Protocol-honoring bun fixture for src/exec/spawn.test.ts. Reads one C1 input frame from stdin and
-// writes one output frame to stdout, branching on `input.mode` so the runner's log, timeout, memory,
+// writes one output frame to stdout, branching on `input.mode` so the runner's log, timeout, output-cap,
 // failure, and crash paths can be driven without a container runtime. This is a stand-in for the
 // argv a real runtime (C3/C8) would supply — the runner never inspects it, only speaks the protocol.
 
@@ -19,9 +19,12 @@ const mode = isRecord(input) ? input.mode : undefined;
 if (mode === 'hang') {
     let spin = 0;
     while (spin >= 0) spin += 1; // busy loop, never writes output → parent SIGKILLs it on the timeout
-} else if (mode === 'oom') {
-    const chunks: unknown[] = [];
-    for (;;) chunks.push(new Array(1_000_000).fill(7)); // grow RSS → parent SIGKILLs it on the cap
+} else if (mode === 'slow') {
+    // Sleep, then emit a valid frame: with no timeoutMs the parent arms no timer and awaits the frame;
+    // with a shorter explicit timeoutMs the parent SIGKILLs before the frame is written.
+    const ms = isRecord(input) && typeof input.ms === 'number' ? input.ms : 0;
+    await Bun.sleep(ms);
+    process.stdout.write(encodeOutput({ ok: true, result: 'slow-done' }));
 } else if (mode === 'flood') {
     const chunk = 'x'.repeat(128 * 1024);
     // Stream stdout without retaining it: own RSS stays low, so only the parent's output cap stops us.
