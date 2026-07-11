@@ -19,6 +19,7 @@ function makeExecutor(db: DB, cfg: WeirConfig): Executor {
         pools: cfg.pools,
         storeDir: cfg.storeDir,
         scratchDir: cfg.scratchDir,
+        containerRuntime: cfg.containerRuntime,
     });
 }
 

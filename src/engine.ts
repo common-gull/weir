@@ -135,6 +135,9 @@ export interface RunDeps {
     storeDir?: string;
     /** Root under which each artifact-staging spec step gets an isolated scratch dir. */
     scratchDir?: string;
+    /** Container runtime binary (docker-CLI-compatible: docker/podman/nerdctl) for container steps —
+     *  argv[0] of the `run` and the `image inspect` digest resolution. Defaults to `docker`. */
+    containerRuntime?: string;
 }
 
 interface Replay {
@@ -295,6 +298,8 @@ function buildCtx(
     signal: AbortSignal,
 ): Ctx {
     const runId = run.id;
+    // Resolved once here since both runContainerStep and the dispatch closure below need it.
+    const containerRuntime = deps.containerRuntime ?? 'docker';
 
     // Core memoized primitive shared by step/now/random/uuid/child/approval.
     async function memoized<T>(
@@ -465,7 +470,13 @@ function buildCtx(
             await mkdir(scratch, { recursive: true });
             await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
             const raw = await runProcess({
-                argv: buildDockerArgv(spec, { scratch, env, mounts: dockerCapabilityMounts(), image }),
+                argv: buildDockerArgv(spec, {
+                    scratch,
+                    env,
+                    mounts: dockerCapabilityMounts(),
+                    image,
+                    runtime: containerRuntime,
+                }),
                 input: opts.input,
                 env,
                 // No spawn-level timeout: the deadline is `opts.timeout`, enforced by the shared attempt
@@ -531,7 +542,7 @@ function buildCtx(
                     if (spec.network) requireCapability('network');
                     if (!pinned) {
                         const ref = dockerImageRef(spec);
-                        const digest = await resolveImageDigest(ref);
+                        const digest = await resolveImageDigest(ref, containerRuntime);
                         pinned = { digest, image: pinnedImageRef(ref, digest) };
                     }
                     imageDigest = pinned.digest;

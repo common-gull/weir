@@ -15,6 +15,9 @@ export interface WeirConfig {
     storeDir: string;
     /** Root under which each artifact-staging spec step gets an isolated scratch dir. */
     scratchDir: string;
+    /** Container runtime binary for container steps — any docker-CLI-compatible binary (podman,
+     *  nerdctl). Used as argv[0] for `<bin> run` and `<bin> image inspect`; defaults to `docker`. */
+    containerRuntime: string;
 }
 
 export function loadConfig(cwd = process.cwd()): WeirConfig {
@@ -37,5 +40,6 @@ export function loadConfig(cwd = process.cwd()): WeirConfig {
         retentionDays: Number(process.env.WEIR_RETENTION_DAYS ?? file.retentionDays ?? 14),
         storeDir: resolve(process.env.WEIR_STORE ?? file.storeDir ?? join(cwd, '.weir', 'artifacts')),
         scratchDir: resolve(process.env.WEIR_SCRATCH ?? file.scratchDir ?? join(cwd, '.weir', 'scratch')),
+        containerRuntime: process.env.WEIR_CONTAINER_RUNTIME ?? file.containerRuntime ?? 'docker',
     };
 }

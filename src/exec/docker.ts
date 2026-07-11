@@ -28,11 +28,12 @@ export function pinnedImageRef(ref: string, digest: string): string {
     return `${name}@${digest}`;
 }
 
-/** Resolve an image tag/ref to its canonical `sha256:<hex>` content digest via the local Docker
+/** Resolve an image tag/ref to its canonical `sha256:<hex>` content digest via the local container
  *  daemon. The image must already be present with a repo digest (weir pulls before pinning); this
- *  reads it rather than pulling, so it never touches the network. Rejects if Docker is unreachable
- *  or the ref has no repo digest. */
-export async function resolveImageDigest(ref: string): Promise<string> {
-    const out = await $`docker image inspect --format '{{json .RepoDigests}}' ${ref}`.text();
+ *  reads it rather than pulling, so it never touches the network. Rejects if the daemon is
+ *  unreachable or the ref has no repo digest. `runtime` is the container binary (a docker-CLI-
+ *  compatible one — podman/nerdctl); it's interpolated as the command, never fed untrusted input. */
+export async function resolveImageDigest(ref: string, runtime = 'docker'): Promise<string> {
+    const out = await $`${runtime} image inspect --format '{{json .RepoDigests}}' ${ref}`.text();
     return parseRepoDigest(out);
 }

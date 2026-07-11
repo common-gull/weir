@@ -43,6 +43,8 @@ export interface ExecutorOpts {
     /** Artifact store + scratch root threaded to every run's spec steps (#C6). */
     storeDir?: string;
     scratchDir?: string;
+    /** Container runtime binary (docker/podman/nerdctl) threaded to every run's container steps. */
+    containerRuntime?: string;
 }
 
 export class Executor {
@@ -69,6 +71,7 @@ export class Executor {
             signal: controller.signal,
             storeDir: this.opts.storeDir,
             scratchDir: this.opts.scratchDir,
+            containerRuntime: this.opts.containerRuntime,
             acquire: async (pool, signal) => {
                 const sem = this.pools.get(pool);
                 if (!sem) return () => {}; // unconfigured pool = unbounded

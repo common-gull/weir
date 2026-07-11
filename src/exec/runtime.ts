@@ -308,17 +308,19 @@ function resolveDockerSpec(spec: DockerStepSpec): { image: string; cmd: string[]
 /** Build the `docker run` argv for a container step, in either authoring form (image+cmd, or
  *  runtime+module — see resolveDockerSpec). Pure: the per-step scratch dir (bind-mounted at /weir),
  *  the capability-scoped env (from resolveExecEnv, #C7, forwarded by name as `-e NAME` so values stay
- *  off the host process table), and any extra mounts (e.g. the claude capability's ~/.claude, see
- *  dockerCapabilityMounts) are all passed in, so the whole argv is a deterministic function of its
- *  inputs and unit-testable without Docker. Defaults to `--network none`, `--rm`, and `-i`: a step
- *  gets no egress, leaves no stopped container, and keeps stdin open so its C1 input frame reaches the
- *  module. A `network: true` spec drops `--network none` for docker's default bridge; the flag is
- *  taken verbatim, its capability gate living in dispatch (slice 4) so this stays pure. A `memory`
- *  spec adds a kernel-enforced `--memory` cap. */
+ *  off the host process table), any extra mounts (e.g. the claude capability's ~/.claude, see
+ *  dockerCapabilityMounts), and the runtime binary used as argv[0] (`opts.runtime`, defaulting to
+ *  `docker` — any docker-CLI-compatible binary like podman/nerdctl) are all passed in, so the whole
+ *  argv is a deterministic function of its inputs and unit-testable without Docker. Defaults to
+ *  `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped container, and keeps
+ *  stdin open so its C1 input frame reaches the module. A `network: true` spec drops `--network none`
+ *  for docker's default bridge; the flag is taken verbatim, its capability gate living in dispatch
+ *  (slice 4) so this stays pure. A `memory` spec adds a kernel-enforced `--memory` cap. */
 export function buildDockerArgv(
     spec: DockerStepSpec,
-    opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[]; image?: string },
+    opts: { scratch: string; env?: Record<string, string>; mounts?: DockerMount[]; image?: string; runtime?: string },
 ): string[] {
+    const runtime = opts.runtime ?? 'docker';
     const { image: resolvedImage, cmd, mounts: specMounts } = resolveDockerSpec(spec);
     // Dispatch resolves the image to a content digest (src/exec/docker.ts) and hands the pinned ref
     // back here, so the argv runs the exact bytes it recorded in the memo. Absent it, run the tag.
@@ -350,7 +352,7 @@ export function buildDockerArgv(
         spec.memory === undefined ? [] : ['--memory', String(spec.memory), '--memory-swap', String(spec.memory)];
     // `-i` keeps the container's stdin open and forwarded so the module can read its C1 input frame;
     // without it docker closes stdin immediately and every containerized step sees EOF instead.
-    return ['docker', 'run', '--rm', '-i', ...networkArgs, ...memoryArgs, ...mountArgs, ...envArgs, image, ...cmd];
+    return [runtime, 'run', '--rm', '-i', ...networkArgs, ...memoryArgs, ...mountArgs, ...envArgs, image, ...cmd];
 }
 
 /** The image reference a docker step runs before digest-pinning — the runtime form's pinned base
