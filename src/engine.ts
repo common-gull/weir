@@ -429,28 +429,33 @@ function buildCtx(
     };
 
     // Container step (rung-2): run the spec as a digest-pinned `docker run` child on the same spawn
-    // seam as a host step, streaming its log lines to step.log like any step. The image is resolved to
-    // its content digest UP FRONT — an unreachable daemon or an image with no local repo digest throws
-    // here and fails the step, with no host fallback — and that digest threads into the memo as the
-    // step's replay identity. A per-step scratch dir is ALWAYS created and bind-mounted at /weir (any
-    // declared inputs staged in, declared outputs snapshotted back), the env is the capability-scoped
-    // resolveExecEnv (#C7) — forwarded by name and used as the docker CLI's own env — and ambient
-    // capability mounts (dockerCapabilityMounts) ride along. `network: true` trades the default egress
-    // lock for docker's bridge and so requires the `network` capability, gated here in dispatch so
-    // buildDockerArgv stays a pure argv function. The scratch dir is torn down once outputs are stored.
+    // seam as a host step, streaming its log lines to step.log like any step. The caller
+    // (containerStepImpl) resolves the image digest and gates `network` ONCE per step and threads the
+    // pinned `image` in here, so every retry/repeat attempt runs that one digest — the memo's replay
+    // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
+    // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
+    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — forwarded by name and
+    // used as the docker CLI's own env — and ambient capability mounts (dockerCapabilityMounts) ride
+    // along. Keying the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown
+    // from racing a retry that stages inputs into the same path; it is torn down once outputs are stored.
+    // Invoked as the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes
+    // that attempt's `signal` — which the wrapper aborts on timeout or run cancellation — for the child.
     async function runContainerStep(
         seq: number,
+        attempt: number,
         spec: DockerStepSpec,
         opts: StepOpts,
-    ): Promise<{ result: unknown; artifacts: StepArtifacts; imageDigest: string }> {
-        if (spec.network) requireCapability('network');
-        const ref = dockerImageRef(spec);
-        const imageDigest = await resolveImageDigest(ref);
-        const image = pinnedImageRef(ref, imageDigest);
-
+        image: string,
+        signal: AbortSignal,
+    ): Promise<{ result: unknown; artifacts: StepArtifacts }> {
         const outputs = spec.outputs ?? [];
         const storeDir = deps.storeDir ?? join(process.cwd(), '.weir', 'artifacts');
-        const scratch = join(deps.scratchDir ?? join(process.cwd(), '.weir', 'scratch'), runId, String(seq));
+        const scratch = join(
+            deps.scratchDir ?? join(process.cwd(), '.weir', 'scratch'),
+            runId,
+            String(seq),
+            String(attempt),
+        );
         // One resolved env for both the `-e NAME` flags and the docker CLI's own environment, so each
         // forwarded name resolves to a value the CLI actually holds (never onto the host process table).
         const env = resolveExecEnv();
@@ -475,7 +480,7 @@ function buildCtx(
                 artifacts: {},
             });
             const artifacts = outputs.length > 0 ? await snapshotOutputs(db, storeDir, scratch, outputs) : {};
-            return { result, artifacts, imageDigest };
+            return { result, artifacts };
         } finally {
             await rm(scratch, { recursive: true, force: true });
         }
@@ -495,7 +500,40 @@ function buildCtx(
         // The artifacts map (when present) and the image digest are also recorded in the memo's columns.
         const wantsArtifacts = (spec.outputs?.length ?? 0) > 0;
         return memoized('container', name, key, async (seq) => {
-            const { result, artifacts, imageDigest } = await runContainerStep(seq, spec, opts);
+            // Route the container run through the shared attempt/retry/repeat/pool/timeout wrapper, so a
+            // container step honors `StepOpts` and records `step_attempts` exactly like a closure step. The
+            // thunk returns the decoded frame result — the value `repeat`'s predicate sees, matching the
+            // public `T` — while the run's artifacts and pinned image digest ride out in closure vars to
+            // reach the memo's columns (the last iteration's, aligned with the returned result).
+            let artifacts: StepArtifacts = {};
+            let imageDigest = '';
+            // Resolve the digest lazily but pin it ONCE across attempts: the `network` gate runs first (an
+            // undeclared capability fails before any daemon call), then the first attempt to reach a
+            // reachable daemon resolves and caches the pinned ref — an unreachable daemon or an image with
+            // no local repo digest throws here and fails the step, no host fallback. Later retry/repeat
+            // attempts reuse that pin, so a mutable tag whose local cache shifts during a backoff window
+            // can't silently run (and memo) a different digest than the attempt being retried; a failed
+            // resolve caches nothing, so an unreachable daemon is still retried like any transient error.
+            let pinned: { digest: string; image: string } | undefined;
+            let attempt = 0;
+            const result = await runStepBody(
+                seq,
+                key,
+                name,
+                async (s) => {
+                    if (spec.network) requireCapability('network');
+                    if (!pinned) {
+                        const ref = dockerImageRef(spec);
+                        const digest = await resolveImageDigest(ref);
+                        pinned = { digest, image: pinnedImageRef(ref, digest) };
+                    }
+                    imageDigest = pinned.digest;
+                    const r = await runContainerStep(seq, attempt++, spec, opts, pinned.image, s.signal);
+                    artifacts = r.artifacts;
+                    return r.result;
+                },
+                opts,
+            );
             return wantsArtifacts
                 ? { value: { result, artifacts }, artifacts, imageDigest }
                 : { value: result, imageDigest };

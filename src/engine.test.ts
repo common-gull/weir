@@ -447,6 +447,54 @@ test('containerStep: a completed memo replays top-level and per-iteration with n
     });
 });
 
+test('containerStep: routes through the retry/attempt machinery identically top-level and loop-scoped (no docker)', async () => {
+    // With no daemon reachable, resolveImageDigest rejects inside the attempt thunk — the kind of
+    // transient failure retries exist for — so the shared wrapper's retry loop drives real attempts with
+    // no container. Before this slice the container path bypassed runStepBody: it recorded zero
+    // step_attempts and never retried, so this asserts the newly-shared machinery on both keying paths.
+    const retries = { max: 2, backoff: { type: 'fixed' as const, base: 1 } };
+    defineWorkflow('ctop', {}, (ctx) => ctx.containerStep('go', { image: 'alpine' }, { retries }));
+    defineWorkflow('cloop', {}, (ctx) =>
+        ctx.loop({ max: 1 }, (it) => it.containerStep('go', { image: 'alpine' }, { retries })),
+    );
+
+    const attemptsOf = async (wf: string) => {
+        const id = createRun(db, wf);
+        expect(await executeRun(db, id)).toBe('failed');
+        // A failed step is never memoized — the retries left no `steps` row on either path.
+        expect((db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number }).n).toBe(0);
+        return db.query(`SELECT attempt, status FROM step_attempts WHERE run_id = ? ORDER BY attempt`).all(id) as {
+            attempt: number;
+            status: string;
+        }[];
+    };
+
+    const top = await attemptsOf('ctop');
+    expect(top.map((a) => a.attempt)).toEqual([0, 1, 2]); // retries.max=2 → 3 attempts, all recorded
+    expect(top.every((a) => a.status === 'failed')).toBe(true);
+    expect(await attemptsOf('cloop')).toEqual(top); // loop-scoped container step records attempts identically
+});
+
+test('containerStep: acquires its declared pool through the shared wrapper (no docker)', async () => {
+    // The pool is acquired in the attempt wrapper before the thunk runs, so a step that then fails (no
+    // daemon) still proves the container path now flows through pool acquisition — it did not before.
+    const acquired: string[] = [];
+    let released = 0;
+    const deps: RunDeps = {
+        acquire: async (pool) => {
+            acquired.push(pool);
+            return () => {
+                released++;
+            };
+        },
+    };
+    defineWorkflow('cpool', {}, (ctx) => ctx.containerStep('go', { image: 'alpine' }, { pool: 'ci' }));
+    const id = createRun(db, 'cpool');
+    expect(await executeRun(db, id, deps)).toBe('failed');
+    expect(acquired).toEqual(['ci']); // acquired once (no retries) via runStepBody's wrapper
+    expect(released).toBe(1); // and released in the wrapper's finally
+});
+
 // ---- real-docker (gated: skipped when the daemon is absent, so CI stays green) ----
 
 const HAS_DOCKER = Bun.which('docker') !== null;
@@ -604,4 +652,33 @@ dockerTest(
         });
     },
     90_000,
+);
+
+dockerTest(
+    'containerStep: repeat re-runs the container per iteration, each recorded as an attempt',
+    async () => {
+        // The success-path proof that a container step honors `repeat`: a fresh container runs per
+        // iteration (a host-side `while` counter caps it), and each run lands its own step_attempts row.
+        try {
+            await $`docker pull busybox:latest`.quiet();
+        } catch {
+            return;
+        }
+        const deps = await containerDeps();
+        let runs = 0;
+        const cmd = ['/bin/sh', '-c', 'printf %s \'{"ok":true,"result":42}\''];
+        defineWorkflow('crepeat', {}, (ctx) =>
+            ctx.containerStep('go', { image: 'busybox:latest', cmd }, { repeat: { max: 5, while: () => ++runs < 3 } }),
+        );
+        const id = createRun(db, 'crepeat');
+        expect(await executeRun(db, id, deps)).toBe('completed');
+        expect(runs).toBe(3); // `while` stops the repeat once the host counter reaches 3
+
+        const attempts = db.query(`SELECT status FROM step_attempts WHERE run_id = ?`).all(id) as { status: string }[];
+        expect(attempts.length).toBe(3); // one container run — one attempt — per repeat iteration
+        expect(attempts.every((a) => a.status === 'succeeded')).toBe(true);
+        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+        expect(JSON.parse(run.result)).toBe(42); // the last iteration's result is what memoizes
+    },
+    60_000,
 );
