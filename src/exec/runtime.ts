@@ -232,6 +232,16 @@ interface ContainerStepCommon {
      *  (cgroup) enforces it — the container is OOM-killed at the limit — so this is the real,
      *  kernel-backed replacement for the runner's retired soft RSS poll. */
     memory?: number | string;
+    /** Environment variables the step declares for its container, merged over the capability-derived
+     *  env (resolveExecEnv, #C7) so an explicit name wins on a clash. Forwarded by name (`-e NAME`)
+     *  exactly like the capability env, so values reach the container from the runtime CLI's own
+     *  environment and never land on the host process table. Additive to the capability path — a step
+     *  can lean on either or both. */
+    env?: Record<string, string>;
+    /** Extra host→container bind mounts the step declares, appended after the weir-supplied ones (the
+     *  scratch dir at /weir and any ambient capability mounts, e.g. claude's ~/.claude). Additive to
+     *  the capability path, not a replacement. */
+    mounts?: ContainerMount[];
     inputs?: ArtifactInput[];
     outputs?: string[];
     /** Host-side output normalizer (#50), the container-rung counterpart of {@link LocalStepSpec.extract}:

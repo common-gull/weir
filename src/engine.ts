@@ -441,12 +441,13 @@ function buildCtx(
     // pinned `image` in here, so every retry/repeat attempt runs that one digest — the memo's replay
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
-    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — forwarded by name and
-    // used as the docker CLI's own env — and ambient capability mounts (containerCapabilityMounts) ride
-    // along. Keying the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown
-    // from racing a retry that stages inputs into the same path; it is torn down once outputs are stored.
-    // Invoked as the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes
-    // that attempt's `signal` — which the wrapper aborts on timeout or run cancellation — for the child.
+    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) merged with the spec's
+    // explicit `env` — forwarded by name and used as the docker CLI's own env — and the ambient
+    // capability mounts (containerCapabilityMounts) plus the spec's explicit `mounts` ride along. Keying
+    // the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown from racing a
+    // retry that stages inputs into the same path; it is torn down once outputs are stored. Invoked as
+    // the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes that
+    // attempt's `signal` — which the wrapper aborts on timeout or run cancellation — for the child.
     async function runContainerStep(
         seq: number,
         attempt: number,
@@ -465,7 +466,9 @@ function buildCtx(
         );
         // One resolved env for both the `-e NAME` flags and the docker CLI's own environment, so each
         // forwarded name resolves to a value the CLI actually holds (never onto the host process table).
-        const env = resolveExecEnv();
+        // The spec's explicit `env` is merged over the capability-derived one (resolveExecEnv, #C7) so an
+        // author-declared var rides alongside the capability path and wins on a name clash.
+        const env = { ...resolveExecEnv(), ...spec.env };
         try {
             await mkdir(scratch, { recursive: true });
             await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
@@ -473,7 +476,7 @@ function buildCtx(
                 argv: buildContainerArgv(spec, {
                     scratch,
                     env,
-                    mounts: containerCapabilityMounts(),
+                    mounts: [...containerCapabilityMounts(), ...(spec.mounts ?? [])],
                     image,
                     runtime: containerRuntime,
                 }),
