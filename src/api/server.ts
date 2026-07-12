@@ -8,7 +8,6 @@ import { onEvent } from '../bus.ts';
 import type { Executor } from '../executor.ts';
 import type { Scheduler } from '../scheduler.ts';
 import { allWorkflows } from '../engine.ts';
-import { knownCapabilities } from '../capabilities.ts';
 import { loadWorkflows } from '../loader.ts';
 import { approveRun, createRun, retryRun } from '../runs.ts';
 
@@ -76,7 +75,6 @@ export function createServer(deps: ServerDeps) {
                 name: wf.name,
                 schedule: wf.opts.schedule ?? null,
                 schedulePaused: sched?.enabled === 0,
-                capabilities: wf.opts.capabilities ?? [],
                 priority: wf.opts.priority ?? 0,
                 lastRun: last ?? null,
                 counts: Object.fromEntries(counts.map((c) => [c.status, c.c])),
@@ -86,12 +84,6 @@ export function createServer(deps: ServerDeps) {
     });
 
     on('GET', /^\/api\/schedules$/, () => json(db.query(`SELECT * FROM schedules ORDER BY next_fire_at`).all()));
-
-    // The declared capability registry (name → description), for the UI to render alongside each
-    // workflow's `capabilities`. Complete after load, since custom capabilities register on import.
-    on('GET', /^\/api\/capabilities$/, () =>
-        json([...knownCapabilities()].map(([name, description]) => ({ name, description }))),
-    );
 
     on('GET', /^\/api\/runs$/, (_req, _m, url) => {
         const wf = url.searchParams.get('workflow');

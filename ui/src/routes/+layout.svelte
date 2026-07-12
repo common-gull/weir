@@ -170,9 +170,7 @@
           <span class="chev">›</span>
         </div>
         <div class="meta">
-          {w.schedule ? w.schedule.cron : 'manual'}{w.schedulePaused ? ' · paused' : ''}{w.capabilities.length
-            ? ` · ${w.capabilities.join(',')}`
-            : ''}
+          {w.schedule ? w.schedule.cron : 'manual'}{w.schedulePaused ? ' · paused' : ''}
         </div>
       </a>
     {/each}
