@@ -599,8 +599,8 @@ test('containerStep: spec-declared env cannot override the baseline env (PATH)',
 });
 
 test('containerStep: a spec-declared mount without the container-mount capability fails before docker', async () => {
-    // A bind mount can expose any host path into the container, so — like network — it is capability-gated
-    // in dispatch, ahead of image resolution: an undeclared mount fails loudly with no daemon in reach.
+    // A bind mount can expose any host path into the container, so it is capability-gated in dispatch,
+    // ahead of image resolution: an undeclared mount fails loudly with no daemon in reach.
     defineWorkflow('needsmount', {}, (ctx) =>
         ctx.containerStep('go', { image: 'alpine', mounts: [{ host: '/', container: '/host' }] }),
     );

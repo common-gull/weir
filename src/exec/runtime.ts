@@ -8,11 +8,9 @@
 
 import { $ } from 'bun';
 import { copyFile, lstat, mkdir, readdir, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, posix, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type ArtifactKind, artifactKind, getArtifact, hashFile, putArtifact } from '../artifacts.ts';
-import { hasCapability } from '../capabilities.ts';
 import type { DB } from '../db.ts';
 
 export type Runtime = 'node' | 'python';
@@ -242,11 +240,12 @@ interface ContainerStepCommon {
      *  buys is over the CLI's own env, not the process table. */
     env?: Record<string, string>;
     /** Extra host→container bind mounts the step declares, appended after the weir-supplied ones (the
-     *  scratch dir at /weir, the runtime form's module mount, and any ambient capability mounts, e.g.
-     *  claude's read-only ~/.claude). Additive, not a replacement: a mount reusing a weir-supplied
-     *  container path is refused (buildContainerArgv) rather than allowed to silently shadow it. Because
-     *  a bind mount can expose any host path (/, the runtime socket) into the container and so escape the
-     *  sandbox, declaring any mount requires the `container-mount` capability (gated in dispatch). */
+     *  scratch dir at /weir and the runtime form's module mount). Additive, not a replacement: a mount
+     *  reusing a weir-supplied container path is refused (buildContainerArgv) rather than allowed to
+     *  silently shadow it. Because a bind mount can expose any host path (/, the runtime socket) into the
+     *  container and so escape the sandbox, declaring any mount requires the `container-mount` capability
+     *  (gated in dispatch). A step needing host credentials — e.g. a `claude` step reusing the host login
+     *  — declares the path here as an ordinary read-only mount (`~/.claude` → /root/.claude, `:ro`). */
     mounts?: ContainerMount[];
     inputs?: ArtifactInput[];
     outputs?: string[];
@@ -334,16 +333,17 @@ function resolveContainerSpec(spec: ContainerStepSpec): { image: string; cmd: st
  *  the baseline env (`opts.env`, from baseExecEnv, forwarded by name as `-e NAME` so
  *  values stay off the host process table), the spec's own declared `env` (forwarded inline as
  *  `-e NAME=VALUE` so it reaches the container without entering the runtime CLI's own environment), any
- *  extra mounts (e.g. the claude capability's ~/.claude, see
- *  containerCapabilityMounts), and the runtime binary used as argv[0] (`opts.runtime`, defaulting to
- *  `docker` — any docker-CLI-compatible binary like podman/nerdctl) are all passed in, so the whole
- *  argv is a deterministic function of its inputs and unit-testable without a container runtime.
+ *  extra mounts the step declares (`opts.mounts`), and the runtime binary used as argv[0]
+ *  (`opts.runtime`, defaulting to `docker` — any docker-CLI-compatible binary like podman/nerdctl) are
+ *  all passed in, so the whole argv is a deterministic function of its inputs and unit-testable without
+ *  a container runtime.
  *  Defaults to `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped container,
  *  and keeps stdin open so its C1 input frame reaches the module. A `network: true` spec drops
  *  `--network none` for docker's default bridge — the flag is taken verbatim and is the sole egress
  *  control, no capability gate. A `memory` spec adds a kernel-enforced `--memory` cap. A spec mount that
- *  reuses a weir-supplied container path (/weir, the module mount, a capability mount) is refused rather
- *  than allowed to shadow it under docker's last-`-v`-wins semantics. */
+ *  reuses a weir-supplied container path (/weir, the module mount) is refused rather than allowed to
+ *  shadow it under docker's last-`-v`-wins semantics; the `container-mount` gate on declaring one lives
+ *  in dispatch, so this stays pure. */
 export function buildContainerArgv(
     spec: ContainerStepSpec,
     opts: {
@@ -369,12 +369,12 @@ export function buildContainerArgv(
         ...specMounts,
         ...(opts.mounts ?? []),
     ];
-    // weir-supplied mounts come first — the scratch dir at /weir, the runtime form's read-only module
-    // mount, and any ambient capability mounts (e.g. claude's read-only ~/.claude). Docker applies the
-    // *last* `-v` for a given container path, so a spec-declared mount reusing one of those paths would
-    // silently win: shadowing /weir breaks input staging/output snapshotting, and re-declaring the
-    // credential mount without `:ro` hands a compromised image a writable path back to host credentials.
-    // Refuse any duplicate container path rather than let a later mount override an earlier one.
+    // weir-supplied mounts come first — the scratch dir at /weir and the runtime form's read-only module
+    // mount. Docker applies the *last* `-v` for a given container path, so a spec-declared mount reusing
+    // one of those paths would silently win: shadowing /weir breaks input staging/output snapshotting,
+    // and re-declaring the module mount without `:ro` hands a compromised image a writable path back to
+    // the author's module. Refuse any duplicate container path rather than let a later mount override an
+    // earlier one.
     const seen = new Set<string>();
     for (const m of mounts) {
         // Compare by kernel-resolved path, not raw string: the kernel collapses `.`/`//` segments and
@@ -433,19 +433,6 @@ export function buildContainerArgv(
  *  run — and record — the exact pinned bytes. */
 export function containerImageRef(spec: ContainerStepSpec): string {
     return resolveContainerSpec(spec).image;
-}
-
-/** Extra bind mounts a step's *ambient* capabilities open into its container. The `claude` capability
- *  mounts the host's ~/.claude into the container so a containerized `claude` step reuses the host login — a
- *  deliberately longer-lived hole (host credentials cross the isolation boundary) the capability
- *  gates. The mount is read-only: the login only needs to be read, and a writable path back to
- *  ~/.claude would let a compromised image plant a settings.json hook or rewrite credentials on the
- *  host. Kept separate from buildContainerArgv so that stays a pure function of its arguments. */
-export function containerCapabilityMounts(): ContainerMount[] {
-    const mounts: ContainerMount[] = [];
-    if (hasCapability('claude'))
-        mounts.push({ host: join(homedir(), '.claude'), container: '/root/.claude', readonly: true });
-    return mounts;
 }
 
 // ---- scratch staging (#C6) ----
