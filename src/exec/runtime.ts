@@ -199,7 +199,7 @@ export function buildArgv(spec: LocalStepSpec): string[] {
 // into the image on it. The container is locked down by default: `--network none` (no egress) and
 // only the per-step scratch dir bind-mounted at /weir, so the module sees its staged inputs and
 // writes its outputs there and nothing else of the host. A `network: true` spec trades that egress
-// lock for docker's default bridge — gated on the `network` capability in dispatch, not here.
+// lock for docker's default bridge — `spec.network` alone is the egress control, no capability gate.
 // Credentials reach it the same capability-scoped way rung-1 gets them (resolveExecEnv, #C7),
 // forwarded by name (`-e NAME`, so the value comes from the docker CLI's env and never lands on the
 // host process table); the image is pinned by digest (src/exec/image.ts) so a replay runs the exact
@@ -224,8 +224,7 @@ const CONTAINER_WEIR_DIR = '/opt/weir';
 /** Fields common to both container authoring forms. */
 interface ContainerStepCommon {
     /** Give the container the docker default bridge network instead of `--network none`. Taken
-     *  verbatim by the builder; dispatch (slice 4) is where opting in requires the `network`
-     *  capability, so this stays a pure argv function. */
+     *  verbatim by the builder and is the sole egress control — opting in needs no capability. */
     network?: boolean;
     /** Hard memory ceiling for the container, mapped to `docker run --memory`. A number is bytes; a
      *  string is docker's own unit syntax (`'512m'`, `'2g'`) and is passed verbatim. The kernel
@@ -314,9 +313,8 @@ function resolveContainerSpec(spec: ContainerStepSpec): { image: string; cmd: st
  *  argv is a deterministic function of its inputs and unit-testable without a container runtime.
  *  Defaults to `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped container,
  *  and keeps stdin open so its C1 input frame reaches the module. A `network: true` spec drops
- *  `--network none` for docker's default bridge; the flag is taken verbatim, its capability gate
- *  living in dispatch (slice 4) so this stays pure. A `memory` spec adds a kernel-enforced `--memory`
- *  cap. */
+ *  `--network none` for docker's default bridge — the flag is taken verbatim and is the sole egress
+ *  control, no capability gate. A `memory` spec adds a kernel-enforced `--memory` cap. */
 export function buildContainerArgv(
     spec: ContainerStepSpec,
     opts: {

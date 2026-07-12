@@ -15,7 +15,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
+import { resolveExecEnv, withCapabilities } from './capabilities.ts';
 import { pinnedImageRef, resolveImageDigest } from './exec/image.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
 import {
@@ -437,8 +437,8 @@ function buildCtx(
 
     // Container step (rung-2): run the spec as a digest-pinned container `run` child on the same spawn
     // seam as a host step, streaming its log lines to step.log like any step. The caller
-    // (containerStepImpl) resolves the image digest and gates `network` ONCE per step and threads the
-    // pinned `image` in here, so every retry/repeat attempt runs that one digest — the memo's replay
+    // (containerStepImpl) resolves the image digest ONCE per step and threads the pinned `image` in
+    // here, so every retry/repeat attempt runs that one digest — the memo's replay
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
     // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — forwarded by name and
@@ -525,8 +525,7 @@ function buildCtx(
             // reach the memo's columns (the last iteration's, aligned with the returned result).
             let artifacts: StepArtifacts = {};
             let imageDigest = '';
-            // Resolve the digest lazily but pin it ONCE across attempts: the `network` gate runs first (an
-            // undeclared capability fails before any daemon call), then the first attempt to reach a
+            // Resolve the digest lazily but pin it ONCE across attempts: the first attempt to reach a
             // reachable daemon resolves and caches the pinned ref — an unreachable daemon or an image with
             // no local repo digest throws here and fails the step, no host fallback. Later retry/repeat
             // attempts reuse that pin, so a mutable tag whose local cache shifts during a backoff window
@@ -539,7 +538,6 @@ function buildCtx(
                 key,
                 name,
                 async (s) => {
-                    if (spec.network) requireCapability('network');
                     if (!pinned) {
                         const ref = containerImageRef(spec);
                         const digest = await resolveImageDigest(ref, containerRuntime);
