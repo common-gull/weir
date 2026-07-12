@@ -46,21 +46,15 @@ export function currentWorkflow(): string | undefined {
 // ---- capability registry ----
 // A declared set of capability names + human descriptions. The built-ins are seeded below; a
 // user's custom tool (e.g. under `workflows/common/`) calls `defineCapability(...)` at import time
-// to make its custom capability first-class — known to `weir doctor`/`list` and the API/UI —
-// instead of an unvalidated magic string. (Custom capabilities still *work* without registering,
-// via the `(string & {})` member of the Capability type; registering just makes them discoverable.)
+// to make its custom capability first-class instead of an unvalidated magic string. (Custom
+// capabilities still *work* without registering, via the `(string & {})` member of the Capability
+// type; registering just makes them discoverable.)
 
 const registry = new Map<Capability, string>();
 
-/** Declare a capability so it's known to doctor/list/the UI. Idempotent (last description wins). */
+/** Declare a capability so it's known to the registry. Idempotent (last description wins). */
 export function defineCapability(name: Capability, description: string): void {
     registry.set(name, description);
-}
-
-/** All declared capabilities, name → description. Complete only after workflows (and their helper
- *  imports) have loaded, since custom capabilities register when their module is imported. */
-export function knownCapabilities(): ReadonlyMap<Capability, string> {
-    return registry;
 }
 
 export function isKnownCapability(name: Capability): boolean {

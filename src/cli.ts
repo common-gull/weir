@@ -7,7 +7,6 @@ import { Executor } from './executor.ts';
 import { Scheduler } from './scheduler.ts';
 import { createServer } from './api/server.ts';
 import { allWorkflows } from './engine.ts';
-import { knownCapabilities, unknownCapabilities } from './capabilities.ts';
 import { loadWorkflows } from './loader.ts';
 import { approveRun, createRun, retryRun } from './runs.ts';
 import { loadConfig, type WeirConfig } from './config.ts';
@@ -33,11 +32,6 @@ async function cmdStart(cfg: WeirConfig): Promise<void> {
     const db = openDb(cfg.db);
     const { files } = await loadWorkflows(cfg.workflowsDir);
     console.log(`loaded ${files} workflow file(s) → ${allWorkflows().length} workflow(s)`);
-    for (const u of unknownCapabilities(allWorkflows())) {
-        console.warn(
-            `⚠ workflow "${u.workflow}" declares undeclared capability "${u.capability}" — still enforced; defineCapability() it to document (see AGENTS.md)`,
-        );
-    }
 
     const executor = makeExecutor(db, cfg);
     const scheduler = new Scheduler(db, () => executor.wake());
@@ -189,15 +183,9 @@ function reportRun(db: DB, id: string, status: string): void {
 
 function cmdList(cfg: WeirConfig): Promise<void> {
     return loadWorkflows(cfg.workflowsDir).then(() => {
-        const known = knownCapabilities();
         for (const wf of allWorkflows()) {
             const sched = wf.opts.schedule ? ` [${wf.opts.schedule.cron}]` : '';
-            const list = wf.opts.capabilities ?? [];
-            const caps = list.length ? ` {${list.map((c) => (known.has(c) ? c : `${c}?`)).join(',')}}` : '';
-            console.log(`${wf.name}${sched}${caps}`);
-        }
-        if (unknownCapabilities(allWorkflows()).length) {
-            console.log('\n? = capability not declared via defineCapability() — see AGENTS.md');
+            console.log(`${wf.name}${sched}`);
         }
     });
 }
@@ -239,14 +227,6 @@ async function main() {
         case 'doctor': {
             const r = await doctor(toolsForRuntime(cfg.containerRuntime), cfg.containerRuntime);
             console.log(r.lines.join('\n'));
-            // Capability validation needs the registry populated, so load workflows (and their
-            // helper imports) first, then flag any declared-but-undeclared capabilities.
-            await loadWorkflows(cfg.workflowsDir);
-            const unknown = unknownCapabilities(allWorkflows());
-            if (unknown.length) {
-                console.log('');
-                for (const u of unknown) console.log(`⚠ ${u.workflow}: undeclared capability "${u.capability}"`);
-            }
             process.exit(r.ok ? 0 : 1);
         }
         default:
