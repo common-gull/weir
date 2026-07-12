@@ -89,11 +89,8 @@ export interface ScheduleDef {
     backfillMax?: number;
 }
 
-export type Capability = 'git-push' | 'gh-pr' | 'gh-comment' | 'network' | 'container-mount' | (string & {});
-
 export interface WorkflowOpts {
     schedule?: ScheduleDef;
-    capabilities?: Capability[];
     priority?: number;
     /** Called with the failure when a run ends in `failed`. */
     onFailure?: (info: { runId: string; workflow: string; error: unknown }) => void | Promise<void>;
@@ -104,7 +101,6 @@ export interface Ctx {
     readonly runId: string;
     readonly workflow: string;
     readonly input: unknown;
-    readonly capabilities: ReadonlySet<Capability>;
 
     /** A step: `ctx.step(name, fn)` runs a closure in-process on the host, memoized/replayed/retried
      *  so a failed run resumes from it. This is the default surface for host-integration work. `step`
@@ -115,14 +111,14 @@ export interface Ctx {
      *  resolved to its content `sha256` digest before it runs — the step's replay identity, recorded in
      *  the memo (`steps.image_digest`) — so a resumed run executes the exact bytes the first attempt did.
      *  Declaring `outputs` resolves to the module result paired with the content hashes those outputs
-     *  snapshotted to. A spec may declare its own `env` (additive to the capability-derived env, which
-     *  stays authoritative on a name clash; forwarded by name so values stay off the host process table)
-     *  and `mounts` (appended to the weir-supplied bind mounts, but refused if they reuse a weir path) —
-     *  both additive to the capability path. Requires a container runtime: an unreachable daemon or an
-     *  unpinnable image fails the step, with no host fallback. `network: true` opens container egress
-     *  (docker's default bridge) and is the sole egress control — no capability required. A `schema` on
-     *  the spec (any Standard Schema v1 validator) is asserted against the result at the extract boundary
-     *  and narrows the return type to its output — a mismatch fails the step with the validator's issues. */
+     *  snapshotted to. A spec declares what its container reaches: `env` (additive to the operational
+     *  baseline, which stays authoritative on a name clash — so a daemon secret crosses in only when the
+     *  step names it) and `mounts` (appended to the weir-supplied bind mounts, but refused if they reuse a
+     *  weir path). Requires a container runtime: an unreachable daemon or an unpinnable image fails the
+     *  step, with no host fallback. `network: true` opens container egress (docker's default bridge) and is
+     *  the sole egress control. A `schema` on the spec (any Standard Schema v1 validator) is asserted
+     *  against the result at the extract boundary and narrows the return type to its output — a mismatch
+     *  fails the step with the validator's issues. */
     containerStep<S extends StandardSchemaV1>(
         name: string,
         spec: ContainerStepSpecWithOutputs & { schema: S },

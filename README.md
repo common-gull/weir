@@ -33,7 +33,7 @@ bun test                          # run the tests
 ## Writing a workflow
 
 Add a `.ts` file to `workflows/`. See `workflows/example.ts` for the shape — steps take options
-for retries, timeouts, and concurrency; workflows take a cron schedule, capabilities, and priority.
+for retries, timeouts, and concurrency; workflows take a cron schedule and a priority.
 
 After editing, adding, or deleting a workflow file, run `weir reload` (or the ↻ button in the
 UI) to pick up the change on a running daemon — schedules for removed or edited workflows are
@@ -43,6 +43,6 @@ reconciled, so a deleted schedule stops firing without a restart.
 
 The engine ships no workflow adapters — tools and helpers are yours. Write one inline in the workflow
 that needs it; once a second workflow needs it, put the module in `workflows/common/` and import it —
-no engine edits (see AGENTS.md). Outward actions are gated by capabilities; declare a custom one with
-`defineCapability(name, description)` (from `src/capabilities.ts`) to make it first-class — validated
-by `weir doctor`, shown by `weir list` and `GET /api/capabilities`.
+no engine edits (see AGENTS.md). To run a step in a sandbox instead of on the host, use
+`ctx.containerStep`: it declares the `env` it needs (a daemon secret crosses in only when named), the
+`mounts` it reads, and whether it gets network egress — see `docs/containerized-steps.md`.

@@ -19,13 +19,11 @@ differs is *where the body runs and what it can reach*, and that is the whole po
 
 `ctx.step(name, fn)` runs `fn` in-process on the host with the daemon's privileges. This is the home
 for host reads and integrations — spawn a process, touch the filesystem, read `process.platform`, call
-one of your own helpers from `workflows/common/`. There is no capability just to run a closure on the
-host; the host is where the daemon already lives — and a check *inside* a host helper would not be a
-real boundary either, since a closure runs under full trust and could shell out (Bun's `$`) to bypass
-it. That's why the engine ships no host adapters to gate: capabilities instead scope which of the
-daemon's credentials an *out-of-process* exec step is handed (`git-push`/`gh-pr`/`gh-comment` — see
-"Capability-scoped env" below), and gate what a container step may reach at the dispatch chokepoint
-(`engine.ts`). See `src/capabilities.ts`.
+one of your own helpers from `workflows/common/`. Nothing gates a closure: the host is where the daemon
+already lives, and a check *inside* a host helper would not be a real boundary either, since a closure
+runs under full trust and could shell out (Bun's `$`) to bypass it. That's why the engine ships no host
+adapters to gate — the boundary a step can actually rely on is the container rung, where what the body
+reaches is exactly what the spec declares (`env`, `mounts`, `network`; see below).
 
 Keep a closure body deterministic across a retry — pull nondeterminism through `ctx.now` / `ctx.random`
 / `ctx.uuid` (which are memoized) so a resumed run replays the same values it first recorded.
@@ -51,8 +49,8 @@ sharing one spawn seam (`src/exec/spawn.ts`) and the same protocol:
   the protocol, so an author ships just a module — `export default (input) => output` for `node`,
   `def step(input): return output` for `python` — and weir wires the protocol around it. This rung is a
   plain subprocess running as the daemon's user; it is **not yet sandboxed from the host**, so its only
-  isolation lever is the capability-scoped env below. It exists as the ergonomic, always-available form
-  (node runs on `bun`, so CI needs no Docker).
+  isolation lever is the secret-free baseline env below. It exists as the ergonomic, always-available
+  form (node runs on `bun`, so CI needs no Docker).
 - **Rung 2 — docker** *(design; not yet wired into dispatch — the argv builder, digest pinning, and
   mount assembly are built and unit-tested, but nothing routes a step to them yet; see below)*. The
   same spawn seam, but the child is a `docker run`. This is the rung that actually sandboxes: a
@@ -83,33 +81,44 @@ identity: a resumed run executes the exact image bytes the first attempt did, ev
 moved. weir reads the digest from an already-present image rather than pulling, so pinning never touches
 the network.
 
-### Capability-scoped env
+### Declared env and mounts
 
 A step never inherits the daemon's full environment — that would hand every child every token the
-daemon holds. Instead weir builds a minimal env from the step's *ambient* capability grants
-(`resolveExecEnv` in `src/capabilities.ts`): a small non-secret operational baseline (`PATH`, `HOME`,
-locale/`TZ`, `TMPDIR`, the proxy vars) plus only the credential vars the declared capabilities name —
-e.g. `git-push` authorizes `GH_TOKEN` / `GITHUB_TOKEN` / `SSH_AUTH_SOCK`. A step that declares no
-credential capability therefore sees none of the daemon's secrets.
+daemon holds. Every container gets the **operational baseline** and nothing more: a small non-secret set
+of vars (`PATH`, `HOME`, locale/`TZ`, `TMPDIR`, the proxy vars — `baseExecEnv` in `src/exec/env.ts`)
+that tooling needs and that names no credential. A daemon secret crosses the boundary only when the step
+**names it** in its own `env`:
 
-For a docker step the same resolved env is forwarded **by name** (`-e NAME`, not `-e NAME=VALUE`): the
-value comes from the docker CLI's own environment and never lands on the host process table (`ps auxww`,
-`/proc/<pid>/cmdline`) for the life of the run. No capability opens a bind mount of its own: a step gets
-exactly the mounts it declares in `mounts` (plus weir's scratch dir and, for the runtime form, the module
-mount). A step that reuses a host credential dir declares it like any other mount — e.g. a containerized
-`claude` step maps `~/.claude` to `/root/.claude` with `readonly: true`, so a compromised image can't
-rewrite credentials or plant a settings hook — and, because a bind mount can expose any host path,
-declaring one requires the `container-mount` capability.
+```ts
+await ctx.containerStep('push', {
+    image: 'my-pusher@sha256:…',
+    env: { GH_TOKEN: process.env.GH_TOKEN ?? '' }, // this container sees the token; no other does
+    mounts: [{ host: `${process.env.HOME}/.claude`, container: '/root/.claude', readonly: true }],
+    network: true,
+});
+```
 
-### Gated network
+The two channels differ in how the value travels. The baseline is forwarded **by name** (`-e NAME`, not
+`-e NAME=VALUE`): the value comes from the container CLI's own environment and never lands on the host
+process table (`ps auxww`, `/proc/<pid>/cmdline`). The spec's `env` rides in **inline** (`-e NAME=VALUE`)
+precisely so it stays *out* of that CLI's environment — a spec var named `DOCKER_HOST` or `PATH` would
+otherwise repoint the daemon's own runtime spawn. The baseline therefore stays authoritative on a name
+clash, and a step naming a secret in `env` accepts that the value is visible on the host process table
+for the life of the run.
 
-A docker step gets `--network none` — no egress — by default. A `network: true` spec trades that for
-docker's default bridge. The argv builder itself takes the flag verbatim and stays a pure,
-Docker-free-testable function of its inputs; the capability gate for opting in lives one layer up, in
-dispatch. That gate is **not yet wired** — no code checks the `network` capability today
-(`requireCapability` is called only for `git-push`, `gh-pr`, and `gh-comment`), because the docker
-dispatch it would live in doesn't exist yet — so declaring or omitting `network` is not an egress
-control until the container rung is dispatched (`ctx.containerStep`).
+`mounts` is the same story for the filesystem: a step gets exactly the bind mounts it declares, plus
+weir's scratch dir at `/weir` (and, for the runtime form, the read-only module mount). Nothing is mounted
+on a step's behalf. A step that reuses a host credential dir declares it like any other mount — e.g. a
+containerized `claude` step maps `~/.claude` to `/root/.claude` with `readonly: true`, so a compromised
+image can't rewrite credentials or plant a settings hook. A bind mount can expose any host path, so
+declare only what the step needs; a mount that would shadow a weir-supplied container path is refused
+outright.
+
+### Network egress
+
+A container step gets `--network none` — no egress — by default. A `network: true` spec trades that for
+docker's default bridge, and is the **sole** egress control: nothing else gates it, and the argv builder
+takes the flag verbatim, staying a pure, Docker-free-testable function of its inputs.
 
 ### Scratch staging and content-addressed I/O
 

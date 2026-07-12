@@ -66,9 +66,8 @@ test('buildContainerArgv refuses a spec mount that shadows a weir-supplied conta
     expect(() =>
         buildContainerArgv({ image: 'img' }, { scratch: '/s', mounts: [{ host: '/evil', container: '/weir' }] }),
     ).toThrow(/already-mounted/);
-    // The capability mount (weir-supplied, passed first via opts.mounts) can't be shadowed either — a
-    // second mount at /root/.claude with `:ro` dropped would hand a compromised image a writable path
-    // back to the host credentials.
+    // An earlier mount in the same list can't be shadowed either — a second mount at /root/.claude with
+    // `:ro` dropped would hand a compromised image a writable path back to the host credentials.
     expect(() =>
         buildContainerArgv(
             { image: 'img' },
@@ -134,7 +133,7 @@ test('a step env (baseline plus a named secret) flows into the docker argv by na
 
 test('a container step naming no secret carries no daemon secret into the argv (C7)', () => {
     // The negative of the case above and the docker-boundary analog of the "secret-free env" guarantee:
-    // with only the baseline (no capability injection, no explicitly named secret), the daemon's GH_TOKEN
+    // with only the baseline (no explicitly named secret), the daemon's GH_TOKEN
     // is never named on the container's argv — neither by `-e NAME` nor by value. Only the operational
     // baseline (PATH) rides along. Should env-forwarding ever leak a secret unbidden, this fails.
     const env = baseExecEnv({ PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' });
@@ -145,13 +144,12 @@ test('a container step naming no secret carries no daemon secret into the argv (
     expect(flat).toContain('-e PATH');
 });
 
-// ---- explicit mounts (author-supplied, replacing the retired claude capability mount) ----
+// ---- explicit mounts (author-supplied) ----
 
 test('a step declaring the ~/.claude mount receives it read-only', () => {
-    // Reproduces the retired claude capability mount as an ordinary author-supplied mount: a step that
-    // reuses the host login declares ~/.claude → /root/.claude as an explicit read-only mount, and
-    // buildContainerArgv renders it with the `:ro` suffix — no mount is injected by capability, so a
-    // step gets exactly the mounts it declares (plus the scratch dir at /weir).
+    // A step that reuses the host login declares ~/.claude → /root/.claude as an explicit read-only mount,
+    // and buildContainerArgv renders it with the `:ro` suffix — no mount is injected on a step's behalf, so
+    // a step gets exactly the mounts it declares (plus the scratch dir at /weir).
     const argv = buildContainerArgv(
         { image: 'img' },
         { scratch: '/s', mounts: [{ host: '/home/u/.claude', container: '/root/.claude', readonly: true }] },

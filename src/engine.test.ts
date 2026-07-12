@@ -172,7 +172,7 @@ test('ctx.map: per-item isolation — one item fails, the rest succeed', async (
     ]);
 });
 
-test('ctx.map: runs without any capability declaration', async () => {
+test('ctx.map: fans out over items with no extra declaration', async () => {
     let ran = 0;
     defineWorkflow('nomap', {}, async (ctx) => {
         return ctx.map([1, 2, 3], (n) => {
@@ -181,7 +181,7 @@ test('ctx.map: runs without any capability declaration', async () => {
         });
     });
     const id = createRun(db, 'nomap');
-    expect(await executeRun(db, id)).toBe('completed'); // map needs no capability
+    expect(await executeRun(db, id)).toBe('completed');
     expect(ran).toBe(3);
     const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
     expect(JSON.parse(run.result)).toEqual([
@@ -398,20 +398,6 @@ test('ctx.step / it.step reject a spec argument, pointing at ctx.containerStep',
     expect(loopErr.message).toMatch(/containerStep/);
 });
 
-test('containerStep: network:true needs no capability; spec.network is the sole egress control', async () => {
-    // With the capability gate gone, dispatch takes a `network: true` step straight to image resolution
-    // — no `network` declaration required. Without a daemon in reach the step still fails, but on the
-    // image resolve, NOT a capability error: proof the gate no longer stands between spec and docker.
-    defineWorkflow('needsnet', {}, (ctx) => ctx.containerStep('go', { image: 'weir-nonexistent:xyz', network: true }));
-    const id = createRun(db, 'needsnet');
-    expect(await executeRun(db, id)).toBe('failed');
-    const err = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string }).error);
-    expect(err.message).not.toMatch(/capability/i);
-    // A failed step isn't memoized — nothing recorded.
-    const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
-    expect(n.n).toBe(0);
-});
-
 test('containerStep: a completed memo replays top-level and per-iteration with no docker', async () => {
     // Seed each container step as a completed memo, then run: dispatch fast-forwards past all three
     // seqs, so resolveImageDigest/docker are never reached. Proves replay, per-iteration namespacing,
@@ -546,7 +532,7 @@ test('containerStep: forwards spec-declared env and mounts into the container ru
     const capture = join(dir, 'capture.txt');
     const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
 
-    defineWorkflow('envmounts', { capabilities: ['container-mount'] }, (ctx) =>
+    defineWorkflow('envmounts', {}, (ctx) =>
         ctx.containerStep('go', {
             image: 'repo:tag',
             env: { FOO: 'bar-value' },
@@ -598,19 +584,21 @@ test('containerStep: spec-declared env cannot override the baseline env (PATH)',
     expect(envPath).toBe(process.env.PATH);
 });
 
-test('containerStep: a spec-declared mount without the container-mount capability fails before docker', async () => {
-    // A bind mount can expose any host path into the container, so it is capability-gated in dispatch,
-    // ahead of image resolution: an undeclared mount fails loudly with no daemon in reach.
-    defineWorkflow('needsmount', {}, (ctx) =>
-        ctx.containerStep('go', { image: 'alpine', mounts: [{ host: '/', container: '/host' }] }),
-    );
-    const id = createRun(db, 'needsmount');
-    expect(await executeRun(db, id)).toBe('failed');
-    const err = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string }).error);
-    expect(err.message).toMatch(/container-mount/);
-    // Gate precedes image resolution, and a failed step isn't memoized — so nothing was recorded.
-    const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
-    expect(n.n).toBe(0);
+test('containerStep: spec.network is the sole egress control — dispatch gates nothing (no docker)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'weir-runtime-'));
+    tmpDirs.push(dir);
+    const capture = join(dir, 'capture.txt');
+    const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
+
+    // A `network: true` spec runs straight through dispatch to the runtime, and the argv it produces drops
+    // the default `--network none` egress lock — the spec field alone opens egress.
+    defineWorkflow('netspec', {}, (ctx) => ctx.containerStep('go', { image: 'repo:tag', network: true }));
+    const id = createRun(db, 'netspec');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    const lines = (await readFile(capture, 'utf8')).split('\n').filter(Boolean);
+    const argv = lines.filter((l) => l.startsWith('ARGV\t')).map((l) => l.slice('ARGV\t'.length));
+    expect(argv).not.toContain('--network');
 });
 
 // ---- real-docker (gated: skipped when the daemon is absent, so CI stays green) ----
@@ -619,7 +607,7 @@ const HAS_DOCKER = Bun.which('docker') !== null;
 const dockerTest = HAS_DOCKER ? test : test.skip;
 
 dockerTest(
-    'containerStep: runs a pinned container, records its digest, needs no capability',
+    'containerStep: runs a pinned container and records its digest',
     async () => {
         // A local image with a repo digest to pin against (inspect never pulls). Skip if the pull can't run
         // (offline) — the point here is dispatch + pinning, not the network.
@@ -632,8 +620,8 @@ dockerTest(
         // A shell one-liner that speaks the C1 protocol: emit one output frame on stdout (the step needs
         // no input, and runProcess tolerates a child that exits before draining stdin). Absolute
         // `/bin/sh` + the `printf` builtin, since dispatch forwards the host PATH into the container as
-        // `-e PATH`. No capability is declared and the default is --network none, so this doubles as
-        // proof a sandboxed step needs no capability at all.
+        // `-e PATH`. The spec declares no env, no mounts, and defaults to --network none, so this doubles
+        // as proof of the locked-down default.
         const cmd = ['/bin/sh', '-c', 'printf %s \'{"ok":true,"result":{"from":"container"}}\''];
         defineWorkflow('run', {}, (ctx) => ctx.containerStep('go', { image: 'busybox:latest', cmd }));
         const id = createRun(db, 'run');
@@ -737,7 +725,7 @@ dockerTest(
     async () => {
         // The docker-runtime analogue of the explicit-env model. The operational baseline reaches every
         // container unconditionally; a daemon-held secret does NOT — it enters the container only when the
-        // step lists it in its own `env`. Nothing is injected by capability. The unit halves are covered
+        // step lists it in its own `env`. Nothing is injected implicitly. The unit halves are covered
         // by env.test.ts (the baseline) and image.test.ts (by-name forwarding keeps values off the argv);
         // this proves the composition end-to-end, inside a real container.
         try {
@@ -850,9 +838,9 @@ dockerTest(
 dockerTest(
     'containerStep: a spec-declared env var and bind mount reach a real container',
     async () => {
-        // End-to-end proof of the #88 additive bridge: an author-declared `env` and `mounts` on the spec
-        // reach a real container run alongside the capability path. The container reports its view of the
-        // declared var and reads a file from the declared read-only mount.
+        // End-to-end proof of the explicit model: an author-declared `env` and `mounts` on the spec reach a
+        // real container run. The container reports its view of the declared var and reads a file from the
+        // declared read-only mount.
         try {
             await $`docker pull busybox:latest`.quiet();
         } catch {
@@ -868,7 +856,7 @@ dockerTest(
             '-c',
             'printf \'{"ok":true,"result":{"env":"%s","file":"%s"}}\' "$FOO" "$(/bin/cat /mnt/note.txt)"',
         ];
-        defineWorkflow('em', { capabilities: ['container-mount'] }, (ctx) =>
+        defineWorkflow('em', {}, (ctx) =>
             ctx.containerStep('go', {
                 image: 'busybox:latest',
                 cmd,

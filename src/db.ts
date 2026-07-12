@@ -11,7 +11,6 @@ const SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS workflows (
   name         TEXT PRIMARY KEY,
   schedule     TEXT,
-  capabilities TEXT,
   registered_at INTEGER NOT NULL
 );
 

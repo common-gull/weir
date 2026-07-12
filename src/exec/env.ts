@@ -1,10 +1,10 @@
 // The operational baseline environment for an exec-step subprocess or a container step — the non-secret
-// vars forwarded unconditionally, independent of any capability grant. A step that names no secret
-// therefore sees none of the daemon's: secrets reach a step only through its own explicit `env`, never by
-// capability. None of these names a credential, so forwarding them leaks no grant — but tooling relies on
-// them, and withholding any silently changes behavior rather than protecting anything (the child already
-// runs as the daemon's user with full filesystem access — the process runtime has no fs sandbox, that's
-// the container runtime's job). Specifically:
+// vars forwarded unconditionally. A step that names no secret therefore sees none of the daemon's:
+// secrets reach a step only through its own explicit `env`. None of these names a credential, so
+// forwarding them leaks nothing — but tooling relies on them, and withholding any silently changes
+// behavior rather than protecting anything (the child already runs as the daemon's user with full
+// filesystem access — the process runtime has no fs sandbox, that's the container runtime's job).
+// Specifically:
 //  - PATH: without it the runtime interpreter (bun/python3) can't even be located.
 //  - HOME: git/ssh and the runtimes resolve their per-user config and caches through it — ~/.gitconfig
 //    (user identity, credential.helper, the safe.directory allowlist git now requires),
