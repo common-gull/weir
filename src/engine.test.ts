@@ -55,8 +55,8 @@ function seedContainerMemo(
     );
 }
 
-// Plant sentinel secrets in the daemon env (which resolveExecEnv reads) for the duration of `fn`, then
-// restore — so a container step's observed env can be asserted against what the capability policy forwards.
+// Plant sentinel secrets in the daemon env for the duration of `fn`, then restore — so a container step's
+// observed env can be asserted against what the baseline forwards and what the step explicitly names.
 async function withDaemonSecrets<T>(fn: () => Promise<T>): Promise<T> {
     const prev = { GH_TOKEN: process.env.GH_TOKEN, WEIR_ENV_SNOOP: process.env.WEIR_ENV_SNOOP };
     process.env.GH_TOKEN = 'gh-secret-xyz';
@@ -572,16 +572,16 @@ test('containerStep: forwards spec-declared env and mounts into the container ru
     expect(envFoo ?? '').toBe('');
 });
 
-test('containerStep: spec-declared env cannot override the capability/baseline env (PATH)', async () => {
+test('containerStep: spec-declared env cannot override the baseline env (PATH)', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'weir-runtime-'));
     tmpDirs.push(dir);
     const capture = join(dir, 'capture.txt');
     const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
 
     // A step that tries to set PATH must not repoint the runtime CLI: the CLI's own process env is the
-    // capability-scoped resolveExecEnv, fully decoupled from spec.env, so a spec var can't reach it and
+    // operational baseline (baseExecEnv), fully decoupled from spec.env, so a spec var can't reach it and
     // hijack the daemon's bare-name spawn of the container runtime. spec.env's PATH still rides inline to
-    // the container (`-e PATH=…`), but resolveExecEnv's PATH (the daemon's) stays the CLI's own.
+    // the container (`-e PATH=…`), but the baseline's PATH (the daemon's) stays the CLI's own.
     defineWorkflow('envclash', {}, (ctx) =>
         ctx.containerStep('go', { image: 'repo:tag', env: { PATH: '/attacker/dir' } }),
     );
@@ -732,38 +732,42 @@ dockerTest(
 );
 
 dockerTest(
-    'containerStep: a daemon secret reaches the container env only under the matching capability',
+    'containerStep: a daemon secret reaches the container env only when the step names it in `env`',
     async () => {
-        // The docker-runtime analogue of the deleted subprocess env tests. Dispatch resolves the
-        // capability-scoped env (resolveExecEnv, #C7) and forwards it by name (`-e NAME`), so a
-        // daemon-held secret enters the container only when a declared capability authorizes its var.
-        // The two halves are unit-tested (capabilities.test.ts gates the vars; runtime.test.ts forwards
-        // them by name only) — this proves the composition end-to-end, inside a real container.
+        // The docker-runtime analogue of the explicit-env model. The operational baseline reaches every
+        // container unconditionally; a daemon-held secret does NOT — it enters the container only when the
+        // step lists it in its own `env`. Nothing is injected by capability. The unit halves are covered
+        // by env.test.ts (the baseline) and image.test.ts (by-name forwarding keeps values off the argv);
+        // this proves the composition end-to-end, inside a real container.
         try {
             await $`docker pull busybox:latest`.quiet();
         } catch {
             return;
         }
-        // The container reports its own view of two daemon-planted vars: GH_TOKEN (which gh-pr names) and
-        // WEIR_ENV_SNOOP (which no capability names). An unforwarded var expands to the empty string.
+        // The container reports its own view of two daemon-planted vars: GH_TOKEN and WEIR_ENV_SNOOP. A var
+        // the baseline doesn't name and the step doesn't pass expands to the empty string.
         const probe = [
             '/bin/sh',
             '-c',
             'printf \'{"ok":true,"result":{"GH_TOKEN":"%s","SNOOP":"%s"}}\' "$GH_TOKEN" "$WEIR_ENV_SNOOP"',
         ];
         await withDaemonSecrets(async () => {
-            // No credential capability: the container sees neither the gh token nor the arbitrary daemon var.
-            defineWorkflow('nocap', {}, (ctx) => ctx.containerStep('probe', { image: 'busybox:latest', cmd: probe }));
-            const bare = createRun(db, 'nocap');
+            // No explicit env: the container sees neither the gh token nor the arbitrary daemon var.
+            defineWorkflow('noenv', {}, (ctx) => ctx.containerStep('probe', { image: 'busybox:latest', cmd: probe }));
+            const bare = createRun(db, 'noenv');
             expect(await executeRun(db, bare, await containerDeps())).toBe('completed');
             const bareRun = db.query(`SELECT result FROM runs WHERE id = ?`).get(bare) as { result: string };
             expect(JSON.parse(bareRun.result)).toEqual({ GH_TOKEN: '', SNOOP: '' });
 
-            // gh-pr authorizes GH_TOKEN (only); the unnamed WEIR_ENV_SNOOP still never rides along.
-            defineWorkflow('ghpr', { capabilities: ['gh-pr'] }, (ctx) =>
-                ctx.containerStep('probe', { image: 'busybox:latest', cmd: probe }),
+            // The step names GH_TOKEN in its own env (only); the unnamed WEIR_ENV_SNOOP still never rides along.
+            defineWorkflow('named', {}, (ctx) =>
+                ctx.containerStep('probe', {
+                    image: 'busybox:latest',
+                    cmd: probe,
+                    env: { GH_TOKEN: process.env.GH_TOKEN ?? '' },
+                }),
             );
-            const scoped = createRun(db, 'ghpr');
+            const scoped = createRun(db, 'named');
             expect(await executeRun(db, scoped, await containerDeps())).toBe('completed');
             const scopedRun = db.query(`SELECT result FROM runs WHERE id = ?`).get(scoped) as { result: string };
             expect(JSON.parse(scopedRun.result)).toEqual({ GH_TOKEN: 'gh-secret-xyz', SNOOP: '' });

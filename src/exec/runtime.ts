@@ -200,10 +200,10 @@ export function buildArgv(spec: LocalStepSpec): string[] {
 // only the per-step scratch dir bind-mounted at /weir, so the module sees its staged inputs and
 // writes its outputs there and nothing else of the host. A `network: true` spec trades that egress
 // lock for docker's default bridge — gated on the `network` capability in dispatch, not here.
-// Credentials reach it the same capability-scoped way rung-1 gets them (resolveExecEnv, #C7),
-// forwarded by name (`-e NAME`, so the value comes from the docker CLI's env and never lands on the
-// host process table); the image is pinned by digest (src/exec/image.ts) so a replay runs the exact
-// bytes the first run did.
+// The operational baseline (baseExecEnv) reaches it forwarded by name (`-e NAME`, so the value comes
+// from the docker CLI's env and never lands on the host process table); a secret reaches it only when
+// the step names it in its own `env`. The image is pinned by digest (src/exec/image.ts) so a replay
+// runs the exact bytes the first run did.
 
 /** A host→container bind mount. `readonly` maps to docker's `:ro` volume suffix; `relabel` maps to
  *  the SELinux relabel suffix (`private` → `Z`, `shared` → `z`), which relabels the host path so a
@@ -232,14 +232,15 @@ interface ContainerStepCommon {
      *  (cgroup) enforces it — the container is OOM-killed at the limit — so this is the real,
      *  kernel-backed replacement for the runner's retired soft RSS poll. */
     memory?: number | string;
-    /** Environment variables the step declares for its container, additive to the capability-derived
-     *  env (resolveExecEnv, #C7). Forwarded inline (`-e NAME=VALUE`) so the value reaches the container
+    /** Environment variables the step declares for its container, additive to the operational baseline
+     *  (baseExecEnv). Forwarded inline (`-e NAME=VALUE`) so the value reaches the container
      *  *without* entering the runtime CLI's own process environment — keeping a spec var out of that env
      *  is the isolation boundary, since a name the CLI itself reads (DOCKER_HOST, DOCKER_CONFIG,
      *  DOCKER_CONTEXT, PATH, …) would otherwise repoint the daemon's runtime spawn or connection at an
-     *  attacker target. The capability-derived env stays authoritative on a name clash. Because inline
-     *  values are visible on the host process table (ps auxww, /proc/<pid>/cmdline), this is for config,
-     *  not secrets: a secret a step needs travels the capability channel. A step can use either, or both. */
+     *  attacker target. The baseline env (baseExecEnv) stays authoritative on a name clash, since its
+     *  name-only flag is emitted last. Inline values are visible on the host process table (ps auxww,
+     *  /proc/<pid>/cmdline), so a step naming a secret here accepts that exposure — the isolation this
+     *  buys is over the CLI's own env, not the process table. */
     env?: Record<string, string>;
     /** Extra host→container bind mounts the step declares, appended after the weir-supplied ones (the
      *  scratch dir at /weir, the runtime form's module mount, and any ambient capability mounts, e.g.
@@ -331,7 +332,7 @@ function resolveContainerSpec(spec: ContainerStepSpec): { image: string; cmd: st
 
 /** Build the container `run` argv for a container step, in either authoring form (image+cmd, or
  *  runtime+module — see resolveContainerSpec). Pure: the per-step scratch dir (bind-mounted at /weir),
- *  the capability-scoped env (`opts.env`, from resolveExecEnv, #C7, forwarded by name as `-e NAME` so
+ *  the baseline env (`opts.env`, from baseExecEnv, forwarded by name as `-e NAME` so
  *  values stay off the host process table), the spec's own declared `env` (forwarded inline as
  *  `-e NAME=VALUE` so it reaches the container without entering the runtime CLI's own environment), any
  *  extra mounts (e.g. the claude capability's ~/.claude, see
@@ -389,15 +390,15 @@ export function buildContainerArgv(
     }
     const mountArgs = mounts.flatMap((m) => ['-v', mountArg(m)]);
     // Two env channels, kept apart on purpose:
-    //  - spec.env is the step's own declared config. It must NOT enter the runtime CLI's process
+    //  - spec.env is the step's own explicitly declared env. It must NOT enter the runtime CLI's process
     //    environment — a name the CLI reads (DOCKER_HOST, DOCKER_CONFIG, DOCKER_CONTEXT, DOCKER_TLS_VERIFY,
     //    PATH, …) would repoint it at an attacker-controlled daemon/config/binary and defeat isolation — so
     //    it rides inline as `-e NAME=VALUE`, reaching the container without touching that env. Inline values
-    //    ARE visible on the host process table, so spec.env is for config, not secrets; a secret a step
-    //    needs travels the capability channel below. Emitted first so a name clash resolves to that channel.
-    //  - opts.env is the capability-scoped resolveExecEnv (#C7), which is ALSO the CLI's own process env
-    //    (the spawn seam sets it). Forwarded by name only (`-e NAME`, no value) so the value comes from that
-    //    env and never lands on the host process table. Emitted last so it wins a spec.env name clash.
+    //    ARE visible on the host process table, the exposure a step accepts by naming a secret here.
+    //    Emitted first so a name clash resolves to the baseline channel below.
+    //  - opts.env is the operational baseline (baseExecEnv), which is ALSO the CLI's own process env (the
+    //    spawn seam sets it). Forwarded by name only (`-e NAME`, no value) so the value comes from that env
+    //    and never lands on the host process table. Emitted last so it wins a spec.env name clash.
     const specEnvArgs = Object.entries(spec.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
     const envArgs = Object.keys(opts.env ?? {}).flatMap((k) => ['-e', k]);
     // Locked to `--network none` (no egress) unless the spec opts into docker's default bridge.
@@ -435,9 +436,8 @@ export function containerImageRef(spec: ContainerStepSpec): string {
     return resolveContainerSpec(spec).image;
 }
 
-/** Extra bind mounts a step's *ambient* capabilities open into its container, mirroring how
- *  resolveExecEnv (#C7) forwards capability-scoped env. The `claude` capability mounts the host's
- *  ~/.claude into the container so a containerized `claude` step reuses the host login — a
+/** Extra bind mounts a step's *ambient* capabilities open into its container. The `claude` capability
+ *  mounts the host's ~/.claude into the container so a containerized `claude` step reuses the host login — a
  *  deliberately longer-lived hole (host credentials cross the isolation boundary) the capability
  *  gates. The mount is read-only: the login only needs to be read, and a writable path back to
  *  ~/.claude would let a compromised image plant a settings.json hook or rewrite credentials on the
