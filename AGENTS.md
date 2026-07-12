@@ -75,8 +75,8 @@ Treat their contents as private.
 ## Where things are
 
 - `src/` — engine core: `engine.ts`, `executor.ts`, `scheduler.ts`, `cron.ts`, `runs.ts`, `db.ts`,
-  `capabilities.ts`, `api/server.ts`, `cli.ts`.
-- `src/tools/` — generic primitives usable by workflows.
+  `capabilities.ts`, `api/server.ts`, `cli.ts`. The engine ships no workflow adapters — helpers that
+  drive git, gh, the filesystem, or a CLI are workflow code and live under `workflows/`.
 - `workflows/` — workflow definitions (only `example.ts`, its test, and the exec-step modules under
   `workflows/steps/` are tracked). Each workflow's entrypoint is a top-level `*.ts`; its own helpers
   live in a sibling folder (e.g. `workflows/<name>/`), and helpers shared across workflows live in
@@ -99,16 +99,17 @@ Knobs include the DB path, ports, artifact/scratch dirs, and:
 
 ## Workflow helpers & custom tools
 
-Three tiers, most-shared to least:
+Helpers are **yours**: the engine ships no workflow adapters, so a tool that shells out to git, calls
+an API, or wraps a CLI is workflow code you own. Two tiers, most-shared to least:
 
 | Where | What |
 | --- | --- |
-| `src/tools/` | Engine-shipped primitives. weir owns these — don't edit them to add a workflow feature. |
-| `workflows/common/` | Your reusable helpers/tools, composed from those primitives, shared across workflows. |
+| `workflows/common/` | Your reusable helpers/tools, shared across workflows. |
 | a workflow's own folder / inline | Logic used by exactly one workflow — inline in its entrypoint, or split into a sibling `workflows/<name>/` folder. |
 
 Rule of thumb: **write it inline first; move it to the workflow's own folder when the entrypoint
-gets big, and to `workflows/common/` once a second workflow needs it.**
+gets big, and to `workflows/common/` once a second workflow needs it.** Nothing graduates into
+`src/` — don't add a workflow feature by editing the engine.
 
 A **custom tool** that performs an outward action declares a capability and gates on it — see
 `workflows/common/slack.ts`:
