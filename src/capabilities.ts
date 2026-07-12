@@ -76,22 +76,22 @@ export function unknownCapabilities(
     return out;
 }
 
-// Built-in capabilities. git-push/gh-pr/gh-comment no longer gate the host-side git/gh CLI adapters:
-// a workflow body runs in-process in the daemon under full trust, so a check there was bypassable
-// (shell out via Bun's `$`) rather than a real boundary. Their teeth are the credential-injection
-// policy below (CAP_ENV) — an exec step gets a git/gh token only if it declares the matching
-// capability. `network` is still enforced via requireCapability(), at the container-dispatch
-// chokepoint (engine.ts), where it gates a non-bypassable network namespace.
+// Built-in capabilities. None has a central chokepoint in src/tools — the host-side git/gh CLI
+// adapters that once gated on git-push/gh-pr/gh-comment are gone, and a workflow body runs
+// in-process in the daemon under full trust anyway, so such a check was bypassable (shell out via
+// Bun's `$`) rather than a real boundary. Their teeth are the credential-injection policy below
+// (CAP_ENV) — an exec step gets a git/gh token only if it declares the matching capability.
+// The one capability with a central chokepoint is 'container-mount' below: a spec mount is data the
+// engine acts on, so requireCapability() in the container-step dispatch (engine.ts) is a real boundary.
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
-// A conventional capability with no central chokepoint (there's no single place all outbound
-// traffic passes through). Seeded so it's a *known* capability, for a workflow or helper tool that
-// gates its own network calls — e.g. workflows/common/slack.ts gates its fetch on its 'slack' capability.
+// Seeded so it's a *known* capability, for a workflow or helper tool that gates its own network
+// calls — e.g. workflows/common/slack.ts gates its fetch on its 'slack' capability.
 defineCapability('network', 'make arbitrary outbound network requests (self-gated; not centrally enforced)');
 // A spec-declared container bind mount can expose any host path (/, the runtime socket, credential
-// dirs) into a container step, escaping the sandbox — the same escalation class `network` gates, so it
-// is gated the same way. Enforced in the container-step dispatch (src/engine.ts), not here.
+// dirs) into a container step, escaping the sandbox, so declaring one is gated. Enforced in the
+// container-step dispatch (src/engine.ts), not here.
 defineCapability('container-mount', 'bind extra host paths into a container step');
 
 // ---- exec-step env policy ----

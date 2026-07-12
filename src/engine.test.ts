@@ -398,15 +398,16 @@ test('ctx.step / it.step reject a spec argument, pointing at ctx.containerStep',
     expect(loopErr.message).toMatch(/containerStep/);
 });
 
-test('containerStep: network:true without the network capability fails before touching docker', async () => {
-    // The capability gate is the FIRST thing dispatch does, ahead of image resolution — so an
-    // undeclared `network` fails loudly without a daemon in reach (this test needs no docker).
-    defineWorkflow('needsnet', {}, (ctx) => ctx.containerStep('go', { image: 'alpine', network: true }));
+test('containerStep: network:true needs no capability; spec.network is the sole egress control', async () => {
+    // With the capability gate gone, dispatch takes a `network: true` step straight to image resolution
+    // — no `network` declaration required. Without a daemon in reach the step still fails, but on the
+    // image resolve, NOT a capability error: proof the gate no longer stands between spec and docker.
+    defineWorkflow('needsnet', {}, (ctx) => ctx.containerStep('go', { image: 'weir-nonexistent:xyz', network: true }));
     const id = createRun(db, 'needsnet');
     expect(await executeRun(db, id)).toBe('failed');
     const err = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string }).error);
-    expect(err.message).toMatch(/network/);
-    // Gate precedes image resolution, and a failed step isn't memoized — so nothing was recorded.
+    expect(err.message).not.toMatch(/capability/i);
+    // A failed step isn't memoized — nothing recorded.
     const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
     expect(n.n).toBe(0);
 });
@@ -598,8 +599,8 @@ test('containerStep: spec-declared env cannot override the capability/baseline e
 });
 
 test('containerStep: a spec-declared mount without the container-mount capability fails before docker', async () => {
-    // A bind mount can expose any host path into the container, so — like network — it is capability-gated
-    // in dispatch, ahead of image resolution: an undeclared mount fails loudly with no daemon in reach.
+    // A bind mount can expose any host path into the container, so it is capability-gated in dispatch,
+    // ahead of image resolution: an undeclared mount fails loudly with no daemon in reach.
     defineWorkflow('needsmount', {}, (ctx) =>
         ctx.containerStep('go', { image: 'alpine', mounts: [{ host: '/', container: '/host' }] }),
     );
