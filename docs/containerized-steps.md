@@ -54,7 +54,7 @@ sharing one spawn seam (`src/exec/spawn.ts`) and the same protocol:
   isolation lever is the capability-scoped env below. It exists as the ergonomic, always-available form
   (node runs on `bun`, so CI needs no Docker).
 - **Rung 2 — docker** *(design; not yet wired into dispatch — the argv builder, digest pinning, and
-  capability mounts are built and unit-tested, but nothing routes a step to them yet; see below)*. The
+  mount assembly are built and unit-tested, but nothing routes a step to them yet; see below)*. The
   same spawn seam, but the child is a `docker run`. This is the rung that actually sandboxes: a
   locked-down network, a single bind-mounted scratch dir, and a digest-pinned image (below). A step is
   authored either as an explicit `image` + `cmd` (the image speaks the protocol itself) or,
@@ -94,9 +94,12 @@ credential capability therefore sees none of the daemon's secrets.
 
 For a docker step the same resolved env is forwarded **by name** (`-e NAME`, not `-e NAME=VALUE`): the
 value comes from the docker CLI's own environment and never lands on the host process table (`ps auxww`,
-`/proc/<pid>/cmdline`) for the life of the run. A capability may also open a bind mount — the `claude`
-capability mounts the host's `~/.claude` read-only so a containerized `claude` step reuses the host
-login; read-only, so a compromised image can't rewrite credentials or plant a settings hook.
+`/proc/<pid>/cmdline`) for the life of the run. No capability opens a bind mount of its own: a step gets
+exactly the mounts it declares in `mounts` (plus weir's scratch dir and, for the runtime form, the module
+mount). A step that reuses a host credential dir declares it like any other mount — e.g. a containerized
+`claude` step maps `~/.claude` to `/root/.claude` with `readonly: true`, so a compromised image can't
+rewrite credentials or plant a settings hook — and, because a bind mount can expose any host path,
+declaring one requires the `container-mount` capability.
 
 ### Gated network
 
