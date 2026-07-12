@@ -76,7 +76,7 @@ Treat their contents as private.
 
 - `src/` — engine core: `engine.ts`, `executor.ts`, `scheduler.ts`, `cron.ts`, `runs.ts`, `db.ts`,
   `capabilities.ts`, `api/server.ts`, `cli.ts`.
-- `src/tools/` — generic primitives usable by workflows (`git`, `gh`, `ghGraphql`, …).
+- `src/tools/` — generic primitives usable by workflows.
 - `workflows/` — workflow definitions (only `example.ts`, its test, and the exec-step modules under
   `workflows/steps/` are tracked). Each workflow's entrypoint is a top-level `*.ts`; its own helpers
   live in a sibling folder (e.g. `workflows/<name>/`), and helpers shared across workflows live in
@@ -103,7 +103,7 @@ Three tiers, most-shared to least:
 
 | Where | What |
 | --- | --- |
-| `src/tools/` | Engine-shipped primitives (`gh`, `ghGraphql`, `git`, …). weir owns these — don't edit them to add a workflow feature. |
+| `src/tools/` | Engine-shipped primitives. weir owns these — don't edit them to add a workflow feature. |
 | `workflows/common/` | Your reusable helpers/tools, composed from those primitives, shared across workflows. |
 | a workflow's own folder / inline | Logic used by exactly one workflow — inline in its entrypoint, or split into a sibling `workflows/<name>/` folder. |
 

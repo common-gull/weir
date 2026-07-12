@@ -438,8 +438,8 @@ function buildCtx(
 
     // Container step (rung-2): run the spec as a digest-pinned container `run` child on the same spawn
     // seam as a host step, streaming its log lines to step.log like any step. The caller
-    // (containerStepImpl) resolves the image digest and gates `network` ONCE per step and threads the
-    // pinned `image` in here, so every retry/repeat attempt runs that one digest — the memo's replay
+    // (containerStepImpl) resolves the image digest ONCE per step and threads the pinned `image` in
+    // here, so every retry/repeat attempt runs that one digest — the memo's replay
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
     // snapshotted back), the env is the operational baseline (baseExecEnv) — used as the runtime
@@ -535,8 +535,7 @@ function buildCtx(
             // reach the memo's columns (the last iteration's, aligned with the returned result).
             let artifacts: StepArtifacts = {};
             let imageDigest = '';
-            // Resolve the digest lazily but pin it ONCE across attempts: the `network` gate runs first (an
-            // undeclared capability fails before any daemon call), then the first attempt to reach a
+            // Resolve the digest lazily but pin it ONCE across attempts: the first attempt to reach a
             // reachable daemon resolves and caches the pinned ref — an unreachable daemon or an image with
             // no local repo digest throws here and fails the step, no host fallback. Later retry/repeat
             // attempts reuse that pin, so a mutable tag whose local cache shifts during a backoff window
@@ -549,12 +548,11 @@ function buildCtx(
                 key,
                 name,
                 async (s) => {
-                    if (spec.network) requireCapability('network');
                     // A spec-declared bind mount can expose any host path (/, the runtime socket) into the
-                    // container, escaping the sandbox — the same escalation class as `network`, so it is
-                    // gated the same way, here in dispatch ahead of image resolution (an undeclared mount
-                    // fails before any daemon call). The ambient capability mounts (containerCapabilityMounts)
-                    // are gated by their own capability and aren't spec-declared, so they're unaffected.
+                    // container, escaping the sandbox — an escalation gated here in dispatch ahead of image
+                    // resolution (an undeclared mount fails before any daemon call). The ambient capability
+                    // mounts (containerCapabilityMounts) are gated by their own capability and aren't
+                    // spec-declared, so they're unaffected.
                     if (spec.mounts?.length) requireCapability('container-mount');
                     if (!pinned) {
                         const ref = containerImageRef(spec);

@@ -118,11 +118,11 @@ export interface Ctx {
      *  snapshotted to. A spec may declare its own `env` (additive to the capability-derived env, which
      *  stays authoritative on a name clash; forwarded by name so values stay off the host process table)
      *  and `mounts` (appended to the weir-supplied bind mounts, but refused if they reuse a weir path) —
-     *  both additive to the capability path. Requires a container runtime: an
-     *  unreachable daemon or an unpinnable image fails the step, with no host fallback. `network: true`
-     *  requires the `network` capability. A `schema` on the spec (any Standard Schema v1 validator) is
-     *  asserted against the result at the extract boundary and narrows the return type to its output — a
-     *  mismatch fails the step with the validator's issues. */
+     *  both additive to the capability path. Requires a container runtime: an unreachable daemon or an
+     *  unpinnable image fails the step, with no host fallback. `network: true` opens container egress
+     *  (docker's default bridge) and is the sole egress control — no capability required. A `schema` on
+     *  the spec (any Standard Schema v1 validator) is asserted against the result at the extract boundary
+     *  and narrows the return type to its output — a mismatch fails the step with the validator's issues. */
     containerStep<S extends StandardSchemaV1>(
         name: string,
         spec: ContainerStepSpecWithOutputs & { schema: S },
