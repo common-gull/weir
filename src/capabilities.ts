@@ -1,7 +1,8 @@
 // Per-workflow capability guardrail (replaces the SDK's canUseTool). Default-deny: a
 // workflow must declare a capability (e.g. 'git-push', 'gh-pr') for its steps to perform
 // that outward action. The current workflow's grants are exposed ambiently via
-// AsyncLocalStorage so the CLI adapters can enforce without threading ctx everywhere.
+// AsyncLocalStorage so the container-dispatch chokepoint and a user's own helpers (a custom tool
+// under workflows/common/) can enforce without threading ctx everywhere.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Capability } from './types.ts';
@@ -76,13 +77,14 @@ export function unknownCapabilities(
     return out;
 }
 
-// Built-in capabilities. None has a central chokepoint in src/tools — the host-side git/gh CLI
-// adapters that once gated on git-push/gh-pr/gh-comment are gone, and a workflow body runs
-// in-process in the daemon under full trust anyway, so such a check was bypassable (shell out via
-// Bun's `$`) rather than a real boundary. Nor do they inject credentials any more: a step's env is the
-// operational baseline plus whatever the step names itself (src/exec/env.ts), never a capability grant.
-// They are declarations of intent, surfaced on the run. `container-mount` below is the one with teeth,
-// enforced via requireCapability() at the container-dispatch chokepoint (engine.ts).
+// Built-in capabilities. git-push/gh-pr/gh-comment have no enforcement chokepoint: the host-side
+// git/gh CLI adapters that once gated them are gone (driving git or gh is workflow code now, owned
+// under workflows/), and a workflow body runs in-process in the daemon under full trust anyway, so
+// such a check was bypassable (shell out via Bun's `$`) rather than a real boundary. Nor do they
+// inject credentials any more: a step's env is the operational baseline plus whatever the step names
+// itself (src/exec/env.ts), never a capability grant. They are declarations of intent, surfaced on
+// the run. `container-mount` below is the one with teeth, enforced via requireCapability() at the
+// container-dispatch chokepoint (engine.ts).
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
