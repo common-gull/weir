@@ -215,11 +215,11 @@ test('image and module reach the argv as standalone elements, never shell-interp
     expect(buildContainerArgv({ image, cmd: ['echo', 'hi'] }, { scratch: '/s' })).toContain(image);
 });
 
-test('the capability-scoped env is forwarded by name only, keeping secret values off the host argv', () => {
-    // The engine passes the capability-scoped resolveExecEnv (#C7) here; whatever it contains must reach
+test('the baseline env is forwarded by name only, keeping secret values off the host argv', () => {
+    // The engine passes the operational baseline (baseExecEnv) here; whatever it contains must reach
     // the container as `-e NAME` (name only) so the value comes from the docker CLI's own environment and
-    // never lands on the host process table. A secret withheld upstream (resolveExecEnv is gated in
-    // capabilities.test.ts) simply isn't in the map, so it's never forwarded.
+    // never lands on the host process table. A var the baseline doesn't name simply isn't in the map, so
+    // it's never forwarded.
     const argv = buildContainerArgv(
         { image: 'img' },
         { scratch: '/s', env: { PATH: '/usr/bin', GH_TOKEN: 'gh-secret' } },
@@ -246,13 +246,13 @@ test('spec-declared env rides inline (-e NAME=VALUE), never entering the runtime
         expect(i).toBeGreaterThan(-1);
         expect(argv[i - 1]).toBe('-e');
     }
-    // The capability env (opts.env) is still forwarded by name only — never inline.
+    // The baseline env (opts.env) is still forwarded by name only — never inline.
     expect(argv[argv.indexOf('PATH') - 1]).toBe('-e');
     expect(argv.some((a) => a === 'PATH=/usr/bin')).toBe(false);
 });
 
-test('a capability env name wins a spec.env clash: its name-only flag is emitted after the inline one', () => {
-    // The runtime applies the last `-e` for a given name, so the capability channel (name-only, emitted
+test('a baseline env name wins a spec.env clash: its name-only flag is emitted after the inline one', () => {
+    // The runtime applies the last `-e` for a given name, so the baseline channel (name-only, emitted
     // last) stays authoritative over a spec.env value of the same name.
     const argv = buildContainerArgv(
         { image: 'img', env: { PATH: '/attacker' } },

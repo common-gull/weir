@@ -46,8 +46,8 @@ export interface RunProtocolOpts {
     /** Receives each stderr line as a log frame; unstructured lines arrive as info-level frames. */
     onLog?: (frame: LogFrame) => void;
     /** Environment for the child. When set it *replaces* the daemon's env (Bun does not merge), so the
-     *  caller decides exactly what the subprocess can see — see `resolveExecEnv` for the capability
-     *  policy. Omitted, the child inherits the daemon's full environment (the runner's raw default). */
+     *  caller decides exactly what the subprocess can see — see `baseExecEnv` for the operational
+     *  baseline. Omitted, the child inherits the daemon's full environment (the runner's raw default). */
     env?: Record<string, string>;
 }
 
