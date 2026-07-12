@@ -75,8 +75,8 @@ Treat their contents as private.
 ## Where things are
 
 - `src/` — engine core: `engine.ts`, `executor.ts`, `scheduler.ts`, `cron.ts`, `runs.ts`, `db.ts`,
-  `capabilities.ts`, `api/server.ts`, `cli.ts`. The engine ships no workflow adapters — helpers that
-  drive git, gh, the filesystem, or a CLI are workflow code and live under `workflows/`.
+  `api/server.ts`, `cli.ts`. The engine ships no workflow adapters — helpers that drive git, gh, the
+  filesystem, or a CLI are workflow code and live under `workflows/`.
 - `workflows/` — workflow definitions (only `example.ts`, its test, and the exec-step modules under
   `workflows/steps/` are tracked). Each workflow's entrypoint is a top-level `*.ts`; its own helpers
   live in a sibling folder (e.g. `workflows/<name>/`), and helpers shared across workflows live in
@@ -84,8 +84,9 @@ Treat their contents as private.
   loaded as a workflow.
 - `ui/` — SvelteKit web UI.
 
-Outward actions are gated by capabilities (`src/capabilities.ts`); declare new ones with
-`defineCapability` rather than bypassing the gate.
+A container step declares what it reaches: `env` (the operational baseline from `src/exec/env.ts` plus
+whatever the step names — so a daemon secret crosses in only when asked for), `mounts` (bind mounts on
+top of weir's scratch dir), and `network` (the sole egress control).
 
 ## Configuration
 
@@ -111,21 +112,27 @@ Rule of thumb: **write it inline first; move it to the workflow's own folder whe
 gets big, and to `workflows/common/` once a second workflow needs it.** Nothing graduates into
 `src/` — don't add a workflow feature by editing the engine.
 
-A **custom tool** that performs an outward action declares a capability and gates on it — see
-`workflows/common/slack.ts`:
+A **custom tool** that performs an outward action is a plain function — the engine gates nothing on
+the host, since workflow code already runs in the trusted daemon process with `process.env` in hand:
 
 ```ts
-import { defineCapability, requireCapability } from '../../src/capabilities.ts';
-
-defineCapability('slack', 'post messages to Slack'); // first-class, not an unvalidated magic string
 export async function slackPost(text: string) {
-  requireCapability('slack');                        // gate the outward action
   await fetch(process.env.SLACK_WEBHOOK_URL, { method: 'POST', body: JSON.stringify({ text }) });
 }
 ```
 
-A custom capability works even unregistered (the `Capability` type has a `(string & {})` member);
-`defineCapability` just makes it first-class in the registry instead of an unvalidated magic string.
+What a step reaches is instead declared where it's actually enforced — on a container step, which sees
+only the operational baseline env plus the `env` it names, the `mounts` it declares, and no egress
+unless it sets `network: true`:
+
+```ts
+await ctx.containerStep('publish', {
+  image: 'my-publisher:1',
+  env: { SLACK_WEBHOOK_URL: process.env.SLACK_WEBHOOK_URL ?? '' }, // secrets cross in only by name
+  mounts: [{ host: `${process.env.HOME}/.claude`, container: '/root/.claude', readonly: true }],
+  network: true,
+});
+```
 
 **Reload caveat:** `weir reload` only cache-busts top-level `workflows/*.ts`. Edits to helpers
 (`workflows/common/`, a workflow's subfolder) or `src/` need a daemon **restart** — Bun caches

@@ -15,7 +15,6 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { requireCapability, withCapabilities } from './capabilities.ts';
 import { baseExecEnv } from './exec/env.ts';
 import { pinnedImageRef, resolveImageDigest } from './exec/image.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
@@ -31,7 +30,6 @@ import {
 import { runProcess } from './exec/spawn.ts';
 import {
     SkipSignal,
-    type Capability,
     type Ctx,
     type LoopCtx,
     type LoopOpts,
@@ -234,14 +232,11 @@ export async function executeRun(db: DB, runId: string, deps: RunDeps = {}): Pro
     const state: Replay = { seq: 0, ordinals: new Map(), memoBySeq: loadMemo(db, runId), loopOrd: 0, mapOrd: 0 };
     const signal = deps.signal ?? new AbortController().signal;
     const input = fromJson(run.input);
-    const caps = new Set<Capability>((def.opts.capabilities ?? []) as Capability[]);
 
-    const ctx = buildCtx(db, def, run, input, caps, state, deps, signal);
+    const ctx = buildCtx(db, def, run, input, state, deps, signal);
 
     try {
-        const result = await withCapabilities({ workflow: def.name, caps }, () =>
-            Promise.resolve(def.body(ctx, input)),
-        );
+        const result = await Promise.resolve(def.body(ctx, input));
         if (result instanceof SkipSignal) {
             finishRun(db, runId, 'completed', { skipped: true, reason: result.reason });
             emit(db, { runId, type: 'run.skipped', message: result.reason });
@@ -292,7 +287,6 @@ function buildCtx(
     def: WorkflowDef,
     run: RunRow,
     input: unknown,
-    caps: Set<Capability>,
     state: Replay,
     deps: RunDeps,
     signal: AbortSignal,
@@ -443,10 +437,9 @@ function buildCtx(
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
     // snapshotted back), the env is the operational baseline (baseExecEnv) — used as the runtime
     // CLI's own env and forwarded into the container by name — while the spec's own `env` rides in as
-    // inline `-e NAME=VALUE` so it can never reach that CLI env, and the spec's `mounts` (gated on the
-    // `container-mount` capability in dispatch, a mount reusing a weir-supplied path refused) ride along.
-    // Those are the only mounts — no capability opens one of its own, so a step gets exactly the mounts it
-    // declares plus the scratch dir. Keying the scratch dir by `attempt` keeps an abandoned (timed-out)
+    // inline `-e NAME=VALUE` so it can never reach that CLI env, and the spec's `mounts` (a mount reusing a
+    // weir-supplied path refused) ride along. Those are the only mounts, so a step gets exactly the mounts
+    // it declares plus the scratch dir. Keying the scratch dir by `attempt` keeps an abandoned (timed-out)
     // attempt's async teardown from racing a retry that stages inputs into the same path; it is torn down
     // once outputs are stored. Invoked as the attempt thunk of `runStepBody`, so it runs once per
     // retry/repeat iteration and takes that attempt's `signal` — which the wrapper aborts on timeout or
@@ -474,7 +467,7 @@ function buildCtx(
         // (DOCKER_HOST/DOCKER_CONFIG/DOCKER_CONTEXT/DOCKER_TLS_VERIFY/PATH/…) would otherwise repoint the
         // daemon's runtime spawn or its connection at an attacker-controlled target. The spec's env instead
         // rides into the container as inline `-e NAME=VALUE` (buildContainerArgv), so the container's
-        // effective env is the baseline plus whatever the step explicitly names — nothing by capability.
+        // effective env is the baseline plus whatever the step explicitly names — nothing implicit.
         const env = baseExecEnv();
         try {
             await mkdir(scratch, { recursive: true });
@@ -548,11 +541,6 @@ function buildCtx(
                 key,
                 name,
                 async (s) => {
-                    // A spec-declared bind mount can expose any host path (/, the runtime socket) into the
-                    // container, escaping the sandbox — an escalation gated here in dispatch ahead of image
-                    // resolution (an undeclared mount fails before any daemon call). Spec mounts are the only
-                    // ones a step can ask for; the weir-supplied scratch and module mounts aren't gated.
-                    if (spec.mounts?.length) requireCapability('container-mount');
                     if (!pinned) {
                         const ref = containerImageRef(spec);
                         const digest = await resolveImageDigest(ref, containerRuntime);
@@ -597,7 +585,6 @@ function buildCtx(
         runId,
         workflow: def.name,
         input,
-        capabilities: caps,
 
         step: makeStepDispatch() as Ctx['step'],
         containerStep: makeContainerDispatch() as Ctx['containerStep'],

@@ -197,7 +197,7 @@ export function buildArgv(spec: LocalStepSpec): string[] {
 // into the image on it. The container is locked down by default: `--network none` (no egress) and
 // only the per-step scratch dir bind-mounted at /weir, so the module sees its staged inputs and
 // writes its outputs there and nothing else of the host. A `network: true` spec trades that egress
-// lock for docker's default bridge — `spec.network` alone is the egress control, no capability gate.
+// lock for docker's default bridge — `spec.network` alone is the egress control.
 // The operational baseline (baseExecEnv) reaches it forwarded by name (`-e NAME`, so the value comes
 // from the docker CLI's env and never lands on the host process table); a secret reaches it only when
 // the step names it in its own `env`. The image is pinned by digest (src/exec/image.ts) so a replay
@@ -222,7 +222,7 @@ const CONTAINER_WEIR_DIR = '/opt/weir';
 /** Fields common to both container authoring forms. */
 interface ContainerStepCommon {
     /** Give the container the docker default bridge network instead of `--network none`. Taken
-     *  verbatim by the builder and is the sole egress control — opting in needs no capability. */
+     *  verbatim by the builder and is the sole egress control. */
     network?: boolean;
     /** Hard memory ceiling for the container, mapped to `docker run --memory`. A number is bytes; a
      *  string is docker's own unit syntax (`'512m'`, `'2g'`) and is passed verbatim. The kernel
@@ -242,10 +242,10 @@ interface ContainerStepCommon {
     /** Extra host→container bind mounts the step declares, appended after the weir-supplied ones (the
      *  scratch dir at /weir and the runtime form's module mount). Additive, not a replacement: a mount
      *  reusing a weir-supplied container path is refused (buildContainerArgv) rather than allowed to
-     *  silently shadow it. Because a bind mount can expose any host path (/, the runtime socket) into the
-     *  container and so escape the sandbox, declaring any mount requires the `container-mount` capability
-     *  (gated in dispatch). A step needing host credentials — e.g. a `claude` step reusing the host login
-     *  — declares the path here as an ordinary read-only mount (`~/.claude` → /root/.claude, `:ro`). */
+     *  silently shadow it. A bind mount can expose any host path (/, the runtime socket) into the container
+     *  and so escape the sandbox, so declare only what the step needs. A step needing host credentials —
+     *  e.g. a `claude` step reusing the host login — declares the path here as an ordinary read-only mount
+     *  (`~/.claude` → /root/.claude, `:ro`), so a compromised image can't rewrite them. */
     mounts?: ContainerMount[];
     inputs?: ArtifactInput[];
     outputs?: string[];
@@ -340,10 +340,9 @@ function resolveContainerSpec(spec: ContainerStepSpec): { image: string; cmd: st
  *  Defaults to `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped container,
  *  and keeps stdin open so its C1 input frame reaches the module. A `network: true` spec drops
  *  `--network none` for docker's default bridge — the flag is taken verbatim and is the sole egress
- *  control, no capability gate. A `memory` spec adds a kernel-enforced `--memory` cap. A spec mount that
- *  reuses a weir-supplied container path (/weir, the module mount) is refused rather than allowed to
- *  shadow it under docker's last-`-v`-wins semantics; the `container-mount` gate on declaring one lives
- *  in dispatch, so this stays pure. */
+ *  control. A `memory` spec adds a kernel-enforced `--memory` cap. A spec mount that reuses a
+ *  weir-supplied container path (/weir, the module mount) is refused rather than allowed to shadow it
+ *  under docker's last-`-v`-wins semantics. */
 export function buildContainerArgv(
     spec: ContainerStepSpec,
     opts: {
