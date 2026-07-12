@@ -233,6 +233,37 @@ test('the capability-scoped env is forwarded by name only, keeping secret values
     expect(argv.some((a) => a === 'GH_TOKEN=gh-secret')).toBe(false);
 });
 
+test('spec-declared env rides inline (-e NAME=VALUE), never entering the runtime CLI env', () => {
+    // spec.env must reach the container without landing in the CLI's own process env (opts.env) — a name
+    // the CLI itself reads (DOCKER_HOST, …) would otherwise repoint it — so it's forwarded inline: the
+    // value is in the argv element, not pulled from the CLI's env by name.
+    const argv = buildContainerArgv(
+        { image: 'img', env: { FOO: 'bar', DOCKER_HOST: 'tcp://evil' } },
+        { scratch: '/s', env: { PATH: '/usr/bin' } },
+    );
+    for (const kv of ['FOO=bar', 'DOCKER_HOST=tcp://evil']) {
+        const i = argv.indexOf(kv);
+        expect(i).toBeGreaterThan(-1);
+        expect(argv[i - 1]).toBe('-e');
+    }
+    // The capability env (opts.env) is still forwarded by name only — never inline.
+    expect(argv[argv.indexOf('PATH') - 1]).toBe('-e');
+    expect(argv.some((a) => a === 'PATH=/usr/bin')).toBe(false);
+});
+
+test('a capability env name wins a spec.env clash: its name-only flag is emitted after the inline one', () => {
+    // The runtime applies the last `-e` for a given name, so the capability channel (name-only, emitted
+    // last) stays authoritative over a spec.env value of the same name.
+    const argv = buildContainerArgv(
+        { image: 'img', env: { PATH: '/attacker' } },
+        { scratch: '/s', env: { PATH: '/usr/bin' } },
+    );
+    const inline = argv.indexOf('PATH=/attacker');
+    const named = argv.indexOf('PATH');
+    expect(inline).toBeGreaterThan(-1);
+    expect(named).toBeGreaterThan(inline);
+});
+
 test('runs a node module end-to-end and routes console output to the log channel', async () => {
     const logs: LogFrame[] = [];
     const out = await runProtocol({
