@@ -89,7 +89,7 @@ export interface ScheduleDef {
     backfillMax?: number;
 }
 
-export type Capability = 'git-push' | 'gh-pr' | 'gh-comment' | 'network' | (string & {});
+export type Capability = 'git-push' | 'gh-pr' | 'gh-comment' | 'network' | 'container-mount' | (string & {});
 
 export interface WorkflowOpts {
     schedule?: ScheduleDef;

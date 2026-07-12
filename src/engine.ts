@@ -441,10 +441,11 @@ function buildCtx(
     // pinned `image` in here, so every retry/repeat attempt runs that one digest — the memo's replay
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
-    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) merged with the spec's
-    // explicit `env` (the capability env authoritative on a clash) — forwarded by name and used as the
-    // docker CLI's own env — and the ambient capability mounts (containerCapabilityMounts) plus the
-    // spec's explicit `mounts` ride along (a mount reusing a weir-supplied path is refused). Keying
+    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — used as the runtime
+    // CLI's own env and forwarded into the container by name — while the spec's own `env` rides in as
+    // inline `-e NAME=VALUE` so it can never reach that CLI env, and the ambient capability mounts
+    // (containerCapabilityMounts) plus the spec's `mounts` (gated on the `container-mount` capability in
+    // dispatch, a mount reusing a weir-supplied path refused) ride along. Keying
     // the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown from racing a
     // retry that stages inputs into the same path; it is torn down once outputs are stored. Invoked as
     // the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes that
@@ -465,14 +466,14 @@ function buildCtx(
             String(seq),
             String(attempt),
         );
-        // One resolved env for both the `-e NAME` flags and the docker CLI's own environment, so each
-        // forwarded name resolves to a value the CLI actually holds (never onto the host process table).
-        // The spec's explicit `env` is additive to the capability-derived one (resolveExecEnv, #C7), but
-        // that env stays authoritative on a name clash: it is *also* the runtime CLI's own environment,
-        // so a step that could override PATH (or any operational/credential var resolveExecEnv controls)
-        // would repoint the daemon's bare-name spawn of the container runtime to an attacker-planted
-        // binary. Spreading resolveExecEnv last means spec.env only contributes names it doesn't cover.
-        const env = { ...spec.env, ...resolveExecEnv() };
+        // The runtime CLI's own process environment is the capability-scoped resolveExecEnv (#C7) ONLY —
+        // never the spec's env. It doubles as the source for the container's `-e NAME` name-only forwards,
+        // so each such name resolves to a value the CLI actually holds (and secret values stay off the host
+        // process table). Keeping spec.env out of it is the isolation boundary: a spec.env name the CLI
+        // itself reads (DOCKER_HOST/DOCKER_CONFIG/DOCKER_CONTEXT/DOCKER_TLS_VERIFY/PATH/…) would otherwise
+        // repoint the daemon's runtime spawn or its connection at an attacker-controlled target. The spec's
+        // env instead rides into the container as inline `-e NAME=VALUE` (buildContainerArgv).
+        const env = resolveExecEnv();
         try {
             await mkdir(scratch, { recursive: true });
             await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
@@ -547,6 +548,12 @@ function buildCtx(
                 name,
                 async (s) => {
                     if (spec.network) requireCapability('network');
+                    // A spec-declared bind mount can expose any host path (/, the runtime socket) into the
+                    // container, escaping the sandbox — the same escalation class as `network`, so it is
+                    // gated the same way, here in dispatch ahead of image resolution (an undeclared mount
+                    // fails before any daemon call). The ambient capability mounts (containerCapabilityMounts)
+                    // are gated by their own capability and aren't spec-declared, so they're unaffected.
+                    if (spec.mounts?.length) requireCapability('container-mount');
                     if (!pinned) {
                         const ref = containerImageRef(spec);
                         const digest = await resolveImageDigest(ref, containerRuntime);

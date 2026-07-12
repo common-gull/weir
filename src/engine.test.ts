@@ -545,7 +545,7 @@ test('containerStep: forwards spec-declared env and mounts into the container ru
     const capture = join(dir, 'capture.txt');
     const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
 
-    defineWorkflow('envmounts', {}, (ctx) =>
+    defineWorkflow('envmounts', { capabilities: ['container-mount'] }, (ctx) =>
         ctx.containerStep('go', {
             image: 'repo:tag',
             env: { FOO: 'bar-value' },
@@ -563,11 +563,13 @@ test('containerStep: forwards spec-declared env and mounts into the container ru
     const mi = argv.indexOf('/host/data:/data:ro');
     expect(mi).toBeGreaterThan(-1);
     expect(argv[mi - 1]).toBe('-v');
-    // The declared env is forwarded by name (`-e FOO`), never as a `FOO=value` argv element…
-    expect(argv[argv.indexOf('FOO') - 1]).toBe('-e');
-    expect(argv.some((a) => a.includes('bar-value'))).toBe(false);
-    // …and its value reaches the runtime CLI's own environment, so the name-only flag resolves.
-    expect(envFoo).toBe('bar-value');
+    // The declared env rides inline as `-e FOO=bar-value` — reaching the container…
+    const fi = argv.indexOf('FOO=bar-value');
+    expect(fi).toBeGreaterThan(-1);
+    expect(argv[fi - 1]).toBe('-e');
+    // …but it must NOT land in the runtime CLI's own environment (that env is decoupled from spec.env,
+    // so a spec var can't repoint the CLI). $FOO is therefore unset in the CLI, captured as empty.
+    expect(envFoo ?? '').toBe('');
 });
 
 test('containerStep: spec-declared env cannot override the capability/baseline env (PATH)', async () => {
@@ -576,21 +578,38 @@ test('containerStep: spec-declared env cannot override the capability/baseline e
     const capture = join(dir, 'capture.txt');
     const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
 
-    // A step that tries to set PATH must not win: that env is also the daemon's own for the runtime CLI,
-    // so an override would repoint the daemon's bare-name spawn of the container runtime to an
-    // attacker-planted binary. resolveExecEnv's PATH (the daemon's) stays authoritative.
+    // A step that tries to set PATH must not repoint the runtime CLI: the CLI's own process env is the
+    // capability-scoped resolveExecEnv, fully decoupled from spec.env, so a spec var can't reach it and
+    // hijack the daemon's bare-name spawn of the container runtime. spec.env's PATH still rides inline to
+    // the container (`-e PATH=…`), but resolveExecEnv's PATH (the daemon's) stays the CLI's own.
     defineWorkflow('envclash', {}, (ctx) =>
         ctx.containerStep('go', { image: 'repo:tag', env: { PATH: '/attacker/dir' } }),
     );
     const id = createRun(db, 'envclash');
     expect(await executeRun(db, id, deps)).toBe('completed');
 
-    const envPath = (await readFile(capture, 'utf8'))
-        .split('\n')
-        .find((l) => l.startsWith('ENV_PATH\t'))
-        ?.slice('ENV_PATH\t'.length);
+    const lines = (await readFile(capture, 'utf8')).split('\n').filter(Boolean);
+    const argv = lines.filter((l) => l.startsWith('ARGV\t')).map((l) => l.slice('ARGV\t'.length));
+    const envPath = lines.find((l) => l.startsWith('ENV_PATH\t'))?.slice('ENV_PATH\t'.length);
+    // The attacker PATH is confined to the container's inline env; the CLI's own PATH is untouched.
+    expect(argv).toContain('PATH=/attacker/dir');
     expect(envPath).not.toBe('/attacker/dir');
     expect(envPath).toBe(process.env.PATH);
+});
+
+test('containerStep: a spec-declared mount without the container-mount capability fails before docker', async () => {
+    // A bind mount can expose any host path into the container, so — like network — it is capability-gated
+    // in dispatch, ahead of image resolution: an undeclared mount fails loudly with no daemon in reach.
+    defineWorkflow('needsmount', {}, (ctx) =>
+        ctx.containerStep('go', { image: 'alpine', mounts: [{ host: '/', container: '/host' }] }),
+    );
+    const id = createRun(db, 'needsmount');
+    expect(await executeRun(db, id)).toBe('failed');
+    const err = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string }).error);
+    expect(err.message).toMatch(/container-mount/);
+    // Gate precedes image resolution, and a failed step isn't memoized — so nothing was recorded.
+    const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
+    expect(n.n).toBe(0);
 });
 
 // ---- real-docker (gated: skipped when the daemon is absent, so CI stays green) ----
@@ -844,7 +863,7 @@ dockerTest(
             '-c',
             'printf \'{"ok":true,"result":{"env":"%s","file":"%s"}}\' "$FOO" "$(/bin/cat /mnt/note.txt)"',
         ];
-        defineWorkflow('em', {}, (ctx) =>
+        defineWorkflow('em', { capabilities: ['container-mount'] }, (ctx) =>
             ctx.containerStep('go', {
                 image: 'busybox:latest',
                 cmd,

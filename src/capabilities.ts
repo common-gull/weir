@@ -91,6 +91,10 @@ defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads'
 // traffic passes through). Seeded so it's a *known* capability, for a workflow or helper tool that
 // gates its own network calls — e.g. workflows/common/slack.ts gates its fetch on its 'slack' capability.
 defineCapability('network', 'make arbitrary outbound network requests (self-gated; not centrally enforced)');
+// A spec-declared container bind mount can expose any host path (/, the runtime socket, credential
+// dirs) into a container step, escaping the sandbox — the same escalation class `network` gates, so it
+// is gated the same way. Enforced in the container-step dispatch (src/engine.ts), not here.
+defineCapability('container-mount', 'bind extra host paths into a container step');
 
 // ---- exec-step env policy ----
 // The capability declaration doubles as the credential-injection policy for exec-step subprocesses
