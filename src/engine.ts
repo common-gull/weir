@@ -21,7 +21,6 @@ import { pinnedImageRef, resolveImageDigest } from './exec/image.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
 import {
     buildContainerArgv,
-    containerCapabilityMounts,
     type ContainerStepSpec,
     containerImageRef,
     type ExtractInput,
@@ -444,13 +443,14 @@ function buildCtx(
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
     // snapshotted back), the env is the operational baseline (baseExecEnv) — used as the runtime
     // CLI's own env and forwarded into the container by name — while the spec's own `env` rides in as
-    // inline `-e NAME=VALUE` so it can never reach that CLI env, and the ambient capability mounts
-    // (containerCapabilityMounts) plus the spec's `mounts` (gated on the `container-mount` capability in
-    // dispatch, a mount reusing a weir-supplied path refused) ride along. Keying
-    // the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown from racing a
-    // retry that stages inputs into the same path; it is torn down once outputs are stored. Invoked as
-    // the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes that
-    // attempt's `signal` — which the wrapper aborts on timeout or run cancellation — for the child.
+    // inline `-e NAME=VALUE` so it can never reach that CLI env, and the spec's `mounts` (gated on the
+    // `container-mount` capability in dispatch, a mount reusing a weir-supplied path refused) ride along.
+    // Those are the only mounts — no capability opens one of its own, so a step gets exactly the mounts it
+    // declares plus the scratch dir. Keying the scratch dir by `attempt` keeps an abandoned (timed-out)
+    // attempt's async teardown from racing a retry that stages inputs into the same path; it is torn down
+    // once outputs are stored. Invoked as the attempt thunk of `runStepBody`, so it runs once per
+    // retry/repeat iteration and takes that attempt's `signal` — which the wrapper aborts on timeout or
+    // run cancellation — for the child.
     async function runContainerStep(
         seq: number,
         attempt: number,
@@ -483,7 +483,7 @@ function buildCtx(
                 argv: buildContainerArgv(spec, {
                     scratch,
                     env,
-                    mounts: [...containerCapabilityMounts(), ...(spec.mounts ?? [])],
+                    mounts: spec.mounts,
                     image,
                     runtime: containerRuntime,
                 }),
@@ -550,9 +550,8 @@ function buildCtx(
                 async (s) => {
                     // A spec-declared bind mount can expose any host path (/, the runtime socket) into the
                     // container, escaping the sandbox — an escalation gated here in dispatch ahead of image
-                    // resolution (an undeclared mount fails before any daemon call). The ambient capability
-                    // mounts (containerCapabilityMounts) are gated by their own capability and aren't
-                    // spec-declared, so they're unaffected.
+                    // resolution (an undeclared mount fails before any daemon call). Spec mounts are the only
+                    // ones a step can ask for; the weir-supplied scratch and module mounts aren't gated.
                     if (spec.mounts?.length) requireCapability('container-mount');
                     if (!pinned) {
                         const ref = containerImageRef(spec);

@@ -2,15 +2,11 @@ import { expect, test } from 'bun:test';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { withCapabilities } from '../capabilities.ts';
-import type { Capability } from '../types.ts';
 import { baseExecEnv } from './env.ts';
 import { parseRepoDigest, pinnedImageRef, resolveImageDigest } from './image.ts';
-import { buildContainerArgv, containerCapabilityMounts, containerImageRef } from './runtime.ts';
+import { buildContainerArgv, containerImageRef } from './runtime.ts';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
-const withCaps = <T>(caps: Capability[], fn: () => T): T =>
-    withCapabilities({ workflow: 'wf', caps: new Set(caps) }, fn);
 
 // ---- buildContainerArgv (pure argv assembly) ----
 
@@ -149,20 +145,22 @@ test('a container step naming no secret carries no daemon secret into the argv (
     expect(flat).toContain('-e PATH');
 });
 
-// ---- containerCapabilityMounts (ambient capability → mounts) ----
+// ---- explicit mounts (author-supplied, replacing the retired claude capability mount) ----
 
-test('containerCapabilityMounts is empty without the claude capability', () => {
-    const mounts = withCaps([], containerCapabilityMounts);
-    expect(mounts).toEqual([]);
-});
-
-test('the claude capability mounts ~/.claude read-only into the container', () => {
-    const mounts = withCaps(['claude'], containerCapabilityMounts);
-    expect(mounts).toHaveLength(1);
-    expect(mounts[0]?.container).toBe('/root/.claude');
-    expect(mounts[0]?.host.endsWith('.claude')).toBe(true);
-    // read-only so a compromised step image can't plant a hook or rewrite credentials on the host.
-    expect(mounts[0]?.readonly).toBe(true);
+test('a step declaring the ~/.claude mount receives it read-only', () => {
+    // Reproduces the retired claude capability mount as an ordinary author-supplied mount: a step that
+    // reuses the host login declares ~/.claude → /root/.claude as an explicit read-only mount, and
+    // buildContainerArgv renders it with the `:ro` suffix — no mount is injected by capability, so a
+    // step gets exactly the mounts it declares (plus the scratch dir at /weir).
+    const argv = buildContainerArgv(
+        { image: 'img' },
+        { scratch: '/s', mounts: [{ host: '/home/u/.claude', container: '/root/.claude', readonly: true }] },
+    );
+    const flat = argv.join(' ');
+    expect(flat).toContain('-v /home/u/.claude:/root/.claude:ro');
+    // only the scratch mount and the declared one — nothing ambient.
+    expect(argv.filter((a) => a === '-v')).toHaveLength(2);
+    expect(flat).toContain('-v /s:/weir:Z');
 });
 
 // ---- digest parsing / pinning (pure strings) ----

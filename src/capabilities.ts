@@ -83,8 +83,8 @@ export function unknownCapabilities(
 // such a check was bypassable (shell out via Bun's `$`) rather than a real boundary. Nor do they
 // inject credentials any more: a step's env is the operational baseline plus whatever the step names
 // itself (src/exec/env.ts), never a capability grant. They are declarations of intent, surfaced on
-// the run. `container-mount` below is the one with teeth, enforced via requireCapability() at the
-// container-dispatch chokepoint (engine.ts).
+// the run. `container-mount` below is the one with teeth: a spec mount is data the engine acts on, so
+// requireCapability() at the container-dispatch chokepoint (engine.ts) is a real boundary.
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
