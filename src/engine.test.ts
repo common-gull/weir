@@ -1,6 +1,6 @@
 import { $ } from 'bun';
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getArtifact } from './artifacts.ts';
@@ -517,6 +517,102 @@ async function _schemaNarrowsReturnType(ctx: Ctx, s: StandardSchemaV1<unknown, {
 }
 void _schemaNarrowsReturnType;
 
+// ---- containerStep: spec-declared env & mounts (#88), docker-free via a fake runtime ----
+
+/** A stand-in container runtime that needs no docker daemon: its `image inspect` branch emits a
+ *  RepoDigests array so the step pins, and its `run` branch records the argv it was invoked with (each
+ *  as an `ARGV\t…` line) plus the values of the forwarded `$FOO` and `$PATH` env — proving what reached
+ *  the CLI's own environment rather than only the argv — then emits a C1 output frame so the step
+ *  completes. The capture path is baked into the script because runProcess replaces the child's env,
+ *  leaving no channel to pass it in. */
+async function fakeRuntime(dir: string, capture: string): Promise<string> {
+    const bin = join(dir, 'fake-runtime');
+    const digest = `sha256:${'a'.repeat(64)}`;
+    await writeFile(
+        bin,
+        `#!/bin/sh
+if [ "$1" = image ]; then echo '["repo@${digest}"]'; exit 0; fi
+{ printf 'ARGV\\t%s\\n' "$@"; printf 'ENV_FOO\\t%s\\n' "$FOO"; printf 'ENV_PATH\\t%s\\n' "$PATH"; } > '${capture}'
+printf '%s' '{"ok":true,"result":{"ran":true}}'
+`,
+    );
+    await chmod(bin, 0o755);
+    return bin;
+}
+
+test('containerStep: forwards spec-declared env and mounts into the container run (no docker)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'weir-runtime-'));
+    tmpDirs.push(dir);
+    const capture = join(dir, 'capture.txt');
+    const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
+
+    defineWorkflow('envmounts', { capabilities: ['container-mount'] }, (ctx) =>
+        ctx.containerStep('go', {
+            image: 'repo:tag',
+            env: { FOO: 'bar-value' },
+            mounts: [{ host: '/host/data', container: '/data', readonly: true }],
+        }),
+    );
+    const id = createRun(db, 'envmounts');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    const lines = (await readFile(capture, 'utf8')).split('\n').filter(Boolean);
+    const argv = lines.filter((l) => l.startsWith('ARGV\t')).map((l) => l.slice('ARGV\t'.length));
+    const envFoo = lines.find((l) => l.startsWith('ENV_FOO\t'))?.slice('ENV_FOO\t'.length);
+
+    // The declared mount rides (after the weir scratch mount) as its own `-v host:container:ro` pair.
+    const mi = argv.indexOf('/host/data:/data:ro');
+    expect(mi).toBeGreaterThan(-1);
+    expect(argv[mi - 1]).toBe('-v');
+    // The declared env rides inline as `-e FOO=bar-value` — reaching the container…
+    const fi = argv.indexOf('FOO=bar-value');
+    expect(fi).toBeGreaterThan(-1);
+    expect(argv[fi - 1]).toBe('-e');
+    // …but it must NOT land in the runtime CLI's own environment (that env is decoupled from spec.env,
+    // so a spec var can't repoint the CLI). $FOO is therefore unset in the CLI, captured as empty.
+    expect(envFoo ?? '').toBe('');
+});
+
+test('containerStep: spec-declared env cannot override the capability/baseline env (PATH)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'weir-runtime-'));
+    tmpDirs.push(dir);
+    const capture = join(dir, 'capture.txt');
+    const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
+
+    // A step that tries to set PATH must not repoint the runtime CLI: the CLI's own process env is the
+    // capability-scoped resolveExecEnv, fully decoupled from spec.env, so a spec var can't reach it and
+    // hijack the daemon's bare-name spawn of the container runtime. spec.env's PATH still rides inline to
+    // the container (`-e PATH=…`), but resolveExecEnv's PATH (the daemon's) stays the CLI's own.
+    defineWorkflow('envclash', {}, (ctx) =>
+        ctx.containerStep('go', { image: 'repo:tag', env: { PATH: '/attacker/dir' } }),
+    );
+    const id = createRun(db, 'envclash');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    const lines = (await readFile(capture, 'utf8')).split('\n').filter(Boolean);
+    const argv = lines.filter((l) => l.startsWith('ARGV\t')).map((l) => l.slice('ARGV\t'.length));
+    const envPath = lines.find((l) => l.startsWith('ENV_PATH\t'))?.slice('ENV_PATH\t'.length);
+    // The attacker PATH is confined to the container's inline env; the CLI's own PATH is untouched.
+    expect(argv).toContain('PATH=/attacker/dir');
+    expect(envPath).not.toBe('/attacker/dir');
+    expect(envPath).toBe(process.env.PATH);
+});
+
+test('containerStep: a spec-declared mount without the container-mount capability fails before docker', async () => {
+    // A bind mount can expose any host path into the container, so — like network — it is capability-gated
+    // in dispatch, ahead of image resolution: an undeclared mount fails loudly with no daemon in reach.
+    defineWorkflow('needsmount', {}, (ctx) =>
+        ctx.containerStep('go', { image: 'alpine', mounts: [{ host: '/', container: '/host' }] }),
+    );
+    const id = createRun(db, 'needsmount');
+    expect(await executeRun(db, id)).toBe('failed');
+    const err = JSON.parse((db.query(`SELECT error FROM runs WHERE id = ?`).get(id) as { error: string }).error);
+    expect(err.message).toMatch(/container-mount/);
+    // Gate precedes image resolution, and a failed step isn't memoized — so nothing was recorded.
+    const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
+    expect(n.n).toBe(0);
+});
+
 // ---- real-docker (gated: skipped when the daemon is absent, so CI stays green) ----
 
 const HAS_DOCKER = Bun.which('docker') !== null;
@@ -745,4 +841,42 @@ dockerTest(
         expect((db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(bad) as { n: number }).n).toBe(0);
     },
     60_000,
+);
+
+dockerTest(
+    'containerStep: a spec-declared env var and bind mount reach a real container',
+    async () => {
+        // End-to-end proof of the #88 additive bridge: an author-declared `env` and `mounts` on the spec
+        // reach a real container run alongside the capability path. The container reports its view of the
+        // declared var and reads a file from the declared read-only mount.
+        try {
+            await $`docker pull busybox:latest`.quiet();
+        } catch {
+            return;
+        }
+        const host = await mkdtemp(join(tmpdir(), 'weir-mount-'));
+        tmpDirs.push(host);
+        await writeFile(join(host, 'note.txt'), 'mounted-bytes');
+        // Absolute `/bin/sh` + `/bin/cat`, since dispatch forwards the host PATH into the container as
+        // `-e PATH` — a bare `cat` wouldn't resolve to busybox's applet (see the daemon-secret test).
+        const cmd = [
+            '/bin/sh',
+            '-c',
+            'printf \'{"ok":true,"result":{"env":"%s","file":"%s"}}\' "$FOO" "$(/bin/cat /mnt/note.txt)"',
+        ];
+        defineWorkflow('em', { capabilities: ['container-mount'] }, (ctx) =>
+            ctx.containerStep('go', {
+                image: 'busybox:latest',
+                cmd,
+                env: { FOO: 'explicit-value' },
+                // `relabel: 'shared'` keeps the read under an enforcing SELinux policy (a no-op when off).
+                mounts: [{ host, container: '/mnt', readonly: true, relabel: 'shared' }],
+            }),
+        );
+        const id = createRun(db, 'em');
+        expect(await executeRun(db, id, await containerDeps())).toBe('completed');
+        const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
+        expect(JSON.parse(run.result)).toEqual({ env: 'explicit-value', file: 'mounted-bytes' });
+    },
+    90_000,
 );

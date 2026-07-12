@@ -9,7 +9,7 @@
 import { $ } from 'bun';
 import { copyFile, lstat, mkdir, readdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, posix, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type ArtifactKind, artifactKind, getArtifact, hashFile, putArtifact } from '../artifacts.ts';
 import { hasCapability } from '../capabilities.ts';
@@ -231,6 +231,22 @@ interface ContainerStepCommon {
      *  (cgroup) enforces it — the container is OOM-killed at the limit — so this is the real,
      *  kernel-backed replacement for the runner's retired soft RSS poll. */
     memory?: number | string;
+    /** Environment variables the step declares for its container, additive to the capability-derived
+     *  env (resolveExecEnv, #C7). Forwarded inline (`-e NAME=VALUE`) so the value reaches the container
+     *  *without* entering the runtime CLI's own process environment — keeping a spec var out of that env
+     *  is the isolation boundary, since a name the CLI itself reads (DOCKER_HOST, DOCKER_CONFIG,
+     *  DOCKER_CONTEXT, PATH, …) would otherwise repoint the daemon's runtime spawn or connection at an
+     *  attacker target. The capability-derived env stays authoritative on a name clash. Because inline
+     *  values are visible on the host process table (ps auxww, /proc/<pid>/cmdline), this is for config,
+     *  not secrets: a secret a step needs travels the capability channel. A step can use either, or both. */
+    env?: Record<string, string>;
+    /** Extra host→container bind mounts the step declares, appended after the weir-supplied ones (the
+     *  scratch dir at /weir, the runtime form's module mount, and any ambient capability mounts, e.g.
+     *  claude's read-only ~/.claude). Additive, not a replacement: a mount reusing a weir-supplied
+     *  container path is refused (buildContainerArgv) rather than allowed to silently shadow it. Because
+     *  a bind mount can expose any host path (/, the runtime socket) into the container and so escape the
+     *  sandbox, declaring any mount requires the `container-mount` capability (gated in dispatch). */
+    mounts?: ContainerMount[];
     inputs?: ArtifactInput[];
     outputs?: string[];
     /** Host-side output normalizer (#50), the container-rung counterpart of {@link LocalStepSpec.extract}:
@@ -278,6 +294,14 @@ function mountArg(m: ContainerMount): string {
     return opts.length > 0 ? `${m.host}:${m.container}:${opts.join(',')}` : `${m.host}:${m.container}`;
 }
 
+/** Canonicalize a container mount target for duplicate detection: POSIX-normalize away `.`/`..` and
+ *  collapsed `//` segments, then drop a trailing slash (keeping bare `/`). Two spellings that resolve to
+ *  the same kernel mountpoint compare equal, so the buildContainerArgv guard can't be bypassed. */
+function containerMountKey(container: string): string {
+    const normalized = posix.normalize(container);
+    return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+}
+
 /** Resolve a container spec's runtime concern — the image, its command tail, and any weir-supplied
  *  mounts — so buildContainerArgv assembles one argv shape for both authoring forms. The image form runs
  *  `image` + `cmd` as given; the runtime form maps to the pinned base image, mounts the module
@@ -306,15 +330,19 @@ function resolveContainerSpec(spec: ContainerStepSpec): { image: string; cmd: st
 
 /** Build the container `run` argv for a container step, in either authoring form (image+cmd, or
  *  runtime+module — see resolveContainerSpec). Pure: the per-step scratch dir (bind-mounted at /weir),
- *  the capability-scoped env (from resolveExecEnv, #C7, forwarded by name as `-e NAME` so values stay
- *  off the host process table), any extra mounts (e.g. the claude capability's ~/.claude, see
+ *  the capability-scoped env (`opts.env`, from resolveExecEnv, #C7, forwarded by name as `-e NAME` so
+ *  values stay off the host process table), the spec's own declared `env` (forwarded inline as
+ *  `-e NAME=VALUE` so it reaches the container without entering the runtime CLI's own environment), any
+ *  extra mounts (e.g. the claude capability's ~/.claude, see
  *  containerCapabilityMounts), and the runtime binary used as argv[0] (`opts.runtime`, defaulting to
  *  `docker` — any docker-CLI-compatible binary like podman/nerdctl) are all passed in, so the whole
  *  argv is a deterministic function of its inputs and unit-testable without a container runtime.
  *  Defaults to `--network none`, `--rm`, and `-i`: a step gets no egress, leaves no stopped container,
  *  and keeps stdin open so its C1 input frame reaches the module. A `network: true` spec drops
  *  `--network none` for docker's default bridge — the flag is taken verbatim and is the sole egress
- *  control, no capability gate. A `memory` spec adds a kernel-enforced `--memory` cap. */
+ *  control, no capability gate. A `memory` spec adds a kernel-enforced `--memory` cap. A spec mount that
+ *  reuses a weir-supplied container path (/weir, the module mount, a capability mount) is refused rather
+ *  than allowed to shadow it under docker's last-`-v`-wins semantics. */
 export function buildContainerArgv(
     spec: ContainerStepSpec,
     opts: {
@@ -340,10 +368,36 @@ export function buildContainerArgv(
         ...specMounts,
         ...(opts.mounts ?? []),
     ];
+    // weir-supplied mounts come first — the scratch dir at /weir, the runtime form's read-only module
+    // mount, and any ambient capability mounts (e.g. claude's read-only ~/.claude). Docker applies the
+    // *last* `-v` for a given container path, so a spec-declared mount reusing one of those paths would
+    // silently win: shadowing /weir breaks input staging/output snapshotting, and re-declaring the
+    // credential mount without `:ro` hands a compromised image a writable path back to host credentials.
+    // Refuse any duplicate container path rather than let a later mount override an earlier one.
+    const seen = new Set<string>();
+    for (const m of mounts) {
+        // Compare by kernel-resolved path, not raw string: the kernel collapses `.`/`//` segments and
+        // ignores a trailing slash, so `/weir/`, `/weir//`, and `/./weir` all mount where `/weir` does.
+        // Normalizing first stops a spec mount from dodging the guard with a non-canonical spelling of a
+        // weir-supplied path and shadowing it under last-`-v`-wins.
+        const key = containerMountKey(m.container);
+        if (seen.has(key)) {
+            throw new Error(`container step mount targets an already-mounted path: ${m.container}`);
+        }
+        seen.add(key);
+    }
     const mountArgs = mounts.flatMap((m) => ['-v', mountArg(m)]);
-    // `-e NAME` (name only) forwards each value from the docker CLI's own environment, which the
-    // spawn seam sets to this same resolved env. Emitting `-e NAME=VALUE` instead would leak secrets
-    // onto the host process table (ps auxww, /proc/<pid>/cmdline) for the life of the run.
+    // Two env channels, kept apart on purpose:
+    //  - spec.env is the step's own declared config. It must NOT enter the runtime CLI's process
+    //    environment — a name the CLI reads (DOCKER_HOST, DOCKER_CONFIG, DOCKER_CONTEXT, DOCKER_TLS_VERIFY,
+    //    PATH, …) would repoint it at an attacker-controlled daemon/config/binary and defeat isolation — so
+    //    it rides inline as `-e NAME=VALUE`, reaching the container without touching that env. Inline values
+    //    ARE visible on the host process table, so spec.env is for config, not secrets; a secret a step
+    //    needs travels the capability channel below. Emitted first so a name clash resolves to that channel.
+    //  - opts.env is the capability-scoped resolveExecEnv (#C7), which is ALSO the CLI's own process env
+    //    (the spawn seam sets it). Forwarded by name only (`-e NAME`, no value) so the value comes from that
+    //    env and never lands on the host process table. Emitted last so it wins a spec.env name clash.
+    const specEnvArgs = Object.entries(spec.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
     const envArgs = Object.keys(opts.env ?? {}).flatMap((k) => ['-e', k]);
     // Locked to `--network none` (no egress) unless the spec opts into docker's default bridge.
     const networkArgs = spec.network ? [] : ['--network', 'none'];
@@ -357,7 +411,19 @@ export function buildContainerArgv(
         spec.memory === undefined ? [] : ['--memory', String(spec.memory), '--memory-swap', String(spec.memory)];
     // `-i` keeps the container's stdin open and forwarded so the module can read its C1 input frame;
     // without it docker closes stdin immediately and every containerized step sees EOF instead.
-    return [runtime, 'run', '--rm', '-i', ...networkArgs, ...memoryArgs, ...mountArgs, ...envArgs, image, ...cmd];
+    return [
+        runtime,
+        'run',
+        '--rm',
+        '-i',
+        ...networkArgs,
+        ...memoryArgs,
+        ...mountArgs,
+        ...specEnvArgs,
+        ...envArgs,
+        image,
+        ...cmd,
+    ];
 }
 
 /** The image reference a container step runs before digest-pinning — the runtime form's pinned base

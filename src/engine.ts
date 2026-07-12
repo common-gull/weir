@@ -15,7 +15,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { resolveExecEnv, withCapabilities } from './capabilities.ts';
+import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
 import { pinnedImageRef, resolveImageDigest } from './exec/image.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
 import {
@@ -441,12 +441,15 @@ function buildCtx(
     // here, so every retry/repeat attempt runs that one digest — the memo's replay
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
-    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — forwarded by name and
-    // used as the docker CLI's own env — and ambient capability mounts (containerCapabilityMounts) ride
-    // along. Keying the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown
-    // from racing a retry that stages inputs into the same path; it is torn down once outputs are stored.
-    // Invoked as the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes
-    // that attempt's `signal` — which the wrapper aborts on timeout or run cancellation — for the child.
+    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — used as the runtime
+    // CLI's own env and forwarded into the container by name — while the spec's own `env` rides in as
+    // inline `-e NAME=VALUE` so it can never reach that CLI env, and the ambient capability mounts
+    // (containerCapabilityMounts) plus the spec's `mounts` (gated on the `container-mount` capability in
+    // dispatch, a mount reusing a weir-supplied path refused) ride along. Keying
+    // the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown from racing a
+    // retry that stages inputs into the same path; it is torn down once outputs are stored. Invoked as
+    // the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes that
+    // attempt's `signal` — which the wrapper aborts on timeout or run cancellation — for the child.
     async function runContainerStep(
         seq: number,
         attempt: number,
@@ -463,8 +466,13 @@ function buildCtx(
             String(seq),
             String(attempt),
         );
-        // One resolved env for both the `-e NAME` flags and the docker CLI's own environment, so each
-        // forwarded name resolves to a value the CLI actually holds (never onto the host process table).
+        // The runtime CLI's own process environment is the capability-scoped resolveExecEnv (#C7) ONLY —
+        // never the spec's env. It doubles as the source for the container's `-e NAME` name-only forwards,
+        // so each such name resolves to a value the CLI actually holds (and secret values stay off the host
+        // process table). Keeping spec.env out of it is the isolation boundary: a spec.env name the CLI
+        // itself reads (DOCKER_HOST/DOCKER_CONFIG/DOCKER_CONTEXT/DOCKER_TLS_VERIFY/PATH/…) would otherwise
+        // repoint the daemon's runtime spawn or its connection at an attacker-controlled target. The spec's
+        // env instead rides into the container as inline `-e NAME=VALUE` (buildContainerArgv).
         const env = resolveExecEnv();
         try {
             await mkdir(scratch, { recursive: true });
@@ -473,7 +481,7 @@ function buildCtx(
                 argv: buildContainerArgv(spec, {
                     scratch,
                     env,
-                    mounts: containerCapabilityMounts(),
+                    mounts: [...containerCapabilityMounts(), ...(spec.mounts ?? [])],
                     image,
                     runtime: containerRuntime,
                 }),
@@ -538,6 +546,12 @@ function buildCtx(
                 key,
                 name,
                 async (s) => {
+                    // A spec-declared bind mount can expose any host path (/, the runtime socket) into the
+                    // container, escaping the sandbox — an escalation gated here in dispatch ahead of image
+                    // resolution (an undeclared mount fails before any daemon call). The ambient capability
+                    // mounts (containerCapabilityMounts) are gated by their own capability and aren't
+                    // spec-declared, so they're unaffected.
+                    if (spec.mounts?.length) requireCapability('container-mount');
                     if (!pinned) {
                         const ref = containerImageRef(spec);
                         const digest = await resolveImageDigest(ref, containerRuntime);
