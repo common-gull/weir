@@ -1,31 +1,24 @@
-// GitHub CLI adapter (`gh`, --json). Outward actions gated by capabilities.
+// GitHub CLI adapter (`gh`, --json).
 
 import { $ } from 'bun';
-import { requireCapability } from '../capabilities.ts';
-import type { Capability } from '../types.ts';
 
 /**
  * Run `gh` with raw args and return stdout. The escape hatch a workflow uses to drive GitHub
- * directly rather than growing a bespoke helper here for every operation. Pass `capability` for
- * anything that writes — it's enforced against the running workflow's grants (ambient, via ALS),
- * so gating works even though the call originates in the workflow.
+ * directly rather than growing a bespoke helper here for every operation.
  */
-export async function gh(args: string[], opts: { capability?: Capability } = {}): Promise<string> {
-    if (opts.capability) requireCapability(opts.capability);
+export async function gh(args: string[]): Promise<string> {
     return await $`gh ${args}`.text();
 }
 
 /**
  * Run a GraphQL query/mutation via `gh api graphql`, returning its `data`. String vars are sent
  * as `-f` (raw), numbers/booleans as `-F` (typed, so `Int!`/`Boolean!` variables bind correctly).
- * Throws on a GraphQL `errors` payload. Mutations pass `capability` to gate the write.
+ * Throws on a GraphQL `errors` payload.
  */
 export async function ghGraphql<T = unknown>(
     query: string,
     vars: Record<string, string | number | boolean> = {},
-    opts: { capability?: Capability } = {},
 ): Promise<T> {
-    if (opts.capability) requireCapability(opts.capability);
     const fields: string[] = ['-f', `query=${query}`];
     for (const [k, v] of Object.entries(vars)) fields.push(typeof v === 'string' ? '-f' : '-F', `${k}=${v}`);
     // gh exits non-zero when the response carries an `errors` payload (and on auth/network failure),
@@ -149,7 +142,6 @@ export async function repoSlug(dir: string): Promise<string | null> {
 }
 
 export async function prComment(repo: string, number: number, body: string): Promise<void> {
-    requireCapability('gh-comment');
     await $`gh pr comment ${number} --repo ${repo} --body ${body}`.quiet();
 }
 
@@ -157,7 +149,6 @@ export async function prCreate(
     repo: string,
     opts: { title: string; body: string; head: string; base?: string; draft?: boolean },
 ): Promise<string> {
-    requireCapability('gh-pr');
     const args = ['pr', 'create', '--repo', repo, '--title', opts.title, '--body', opts.body, '--head', opts.head];
     if (opts.base) args.push('--base', opts.base);
     if (opts.draft) args.push('--draft');
