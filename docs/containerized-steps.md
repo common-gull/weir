@@ -20,9 +20,12 @@ differs is *where the body runs and what it can reach*, and that is the whole po
 `ctx.step(name, fn)` runs `fn` in-process on the host with the daemon's privileges. This is the home
 for host reads and integrations — spawn a process, touch the filesystem, read `process.platform`, call
 a tool in `src/tools/`. There is no capability just to run a closure on the host; the host is where the
-daemon already lives. Specific *outward* actions are gated on their own capabilities at their
-chokepoints (`git-push`, `gh-pr`, `gh-comment`, `network`; see `src/capabilities.ts`), not on running
-code as such.
+daemon already lives — and a check *inside* a host tool would not be a real boundary either, since a
+closure runs under full trust and could shell out (Bun's `$`) to bypass it. So the `git`/`gh` tools no
+longer gate their own calls: `git-push`/`gh-pr`/`gh-comment` instead scope which of the daemon's
+credentials an *out-of-process* exec step is handed (see "Capability-scoped env" below), while
+`network` gates the container's network namespace at the dispatch chokepoint (`engine.ts`). See
+`src/capabilities.ts`.
 
 Keep a closure body deterministic across a retry — pull nondeterminism through `ctx.now` / `ctx.random`
 / `ctx.uuid` (which are memoized) so a resumed run replays the same values it first recorded.
