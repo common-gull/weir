@@ -61,8 +61,27 @@ export function isKnownCapability(name: Capability): boolean {
     return registry.has(name);
 }
 
-// Built-in capabilities, each enforced via requireCapability() at its chokepoint(s): the CLI
-// adapters in src/tools for git/gh.
+/** Capabilities a workflow declares that aren't in the registry — surfaced as warnings, not
+ *  errors (an unregistered capability still enforces; it's just undocumented). Structurally typed
+ *  so this stays free of an engine import (avoids a cycle). */
+export function unknownCapabilities(
+    workflows: readonly { readonly name: string; readonly opts: { readonly capabilities?: readonly Capability[] } }[],
+): { workflow: string; capability: Capability }[] {
+    const out: { workflow: string; capability: Capability }[] = [];
+    for (const wf of workflows) {
+        for (const cap of wf.opts.capabilities ?? []) {
+            if (!registry.has(cap)) out.push({ workflow: wf.name, capability: cap });
+        }
+    }
+    return out;
+}
+
+// Built-in capabilities. git-push/gh-pr/gh-comment no longer gate the host-side git/gh CLI adapters:
+// a workflow body runs in-process in the daemon under full trust, so a check there was bypassable
+// (shell out via Bun's `$`) rather than a real boundary. Their teeth are the credential-injection
+// policy below (CAP_ENV) — an exec step gets a git/gh token only if it declares the matching
+// capability. `network` is still enforced via requireCapability(), at the container-dispatch
+// chokepoint (engine.ts), where it gates a non-bypassable network namespace.
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
