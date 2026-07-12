@@ -82,14 +82,14 @@ export function unknownCapabilities(
     return out;
 }
 
-// Built-in capabilities, each enforced via requireCapability() at its chokepoint(s): the CLI
-// adapters in src/tools for git/gh.
+// Built-in capabilities. None has a central chokepoint in src/tools — enforcement is up to
+// whatever tool (built-in or under workflows/common/) calls requireCapability() to gate its own
+// outward action, same as 'network' below.
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
-// A conventional capability with no central chokepoint (there's no single place all outbound
-// traffic passes through). Seeded so it's a *known* capability, for a workflow or helper tool that
-// gates its own network calls — e.g. workflows/common/slack.ts gates its fetch on its 'slack' capability.
+// Seeded so it's a *known* capability, for a workflow or helper tool that gates its own network
+// calls — e.g. workflows/common/slack.ts gates its fetch on its 'slack' capability.
 defineCapability('network', 'make arbitrary outbound network requests (self-gated; not centrally enforced)');
 
 // ---- exec-step env policy ----
