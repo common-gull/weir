@@ -41,7 +41,7 @@ reconciled, so a deleted schedule stops firing without a restart.
 
 ## Extending it
 
-`src/tools/` ships generic primitives (`gh`, `ghGraphql`, `git`, …). To add your own
+`src/tools/` ships generic primitives. To add your own
 reusable tools/helpers or share code between workflows, put modules in `workflows/common/` and
 import them — no engine edits (see AGENTS.md). Outward actions are gated by capabilities; declare a custom one with
 `defineCapability(name, description)` (from `src/capabilities.ts`) to make it first-class — validated
