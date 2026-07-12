@@ -9,7 +9,7 @@
 import { $ } from 'bun';
 import { copyFile, lstat, mkdir, readdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, posix, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type ArtifactKind, artifactKind, getArtifact, hashFile, putArtifact } from '../artifacts.ts';
 import { hasCapability } from '../capabilities.ts';
@@ -295,6 +295,14 @@ function mountArg(m: ContainerMount): string {
     return opts.length > 0 ? `${m.host}:${m.container}:${opts.join(',')}` : `${m.host}:${m.container}`;
 }
 
+/** Canonicalize a container mount target for duplicate detection: POSIX-normalize away `.`/`..` and
+ *  collapsed `//` segments, then drop a trailing slash (keeping bare `/`). Two spellings that resolve to
+ *  the same kernel mountpoint compare equal, so the buildContainerArgv guard can't be bypassed. */
+function containerMountKey(container: string): string {
+    const normalized = posix.normalize(container);
+    return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+}
+
 /** Resolve a container spec's runtime concern — the image, its command tail, and any weir-supplied
  *  mounts — so buildContainerArgv assembles one argv shape for both authoring forms. The image form runs
  *  `image` + `cmd` as given; the runtime form maps to the pinned base image, mounts the module
@@ -369,10 +377,15 @@ export function buildContainerArgv(
     // Refuse any duplicate container path rather than let a later mount override an earlier one.
     const seen = new Set<string>();
     for (const m of mounts) {
-        if (seen.has(m.container)) {
+        // Compare by kernel-resolved path, not raw string: the kernel collapses `.`/`//` segments and
+        // ignores a trailing slash, so `/weir/`, `/weir//`, and `/./weir` all mount where `/weir` does.
+        // Normalizing first stops a spec mount from dodging the guard with a non-canonical spelling of a
+        // weir-supplied path and shadowing it under last-`-v`-wins.
+        const key = containerMountKey(m.container);
+        if (seen.has(key)) {
             throw new Error(`container step mount targets an already-mounted path: ${m.container}`);
         }
-        seen.add(m.container);
+        seen.add(key);
     }
     const mountArgs = mounts.flatMap((m) => ['-v', mountArg(m)]);
     // Two env channels, kept apart on purpose:

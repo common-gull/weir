@@ -84,6 +84,26 @@ test('buildContainerArgv refuses a spec mount that shadows a weir-supplied conta
             },
         ),
     ).toThrow('/root/.claude');
+    // A non-canonical spelling of a weir-supplied path — trailing slash, collapsed `//`, or a `/./`
+    // segment — resolves to the same kernel mountpoint, so it must be refused too rather than sneaking
+    // past an exact-string check and shadowing the scratch or credential mount under last-`-v`-wins.
+    for (const container of ['/weir/', '/weir//', '/./weir']) {
+        expect(() =>
+            buildContainerArgv({ image: 'img' }, { scratch: '/s', mounts: [{ host: '/evil', container }] }),
+        ).toThrow(/already-mounted/);
+    }
+    expect(() =>
+        buildContainerArgv(
+            { image: 'img' },
+            {
+                scratch: '/s',
+                mounts: [
+                    { host: '/home/u/.claude', container: '/root/.claude', readonly: true },
+                    { host: '/evil', container: '/root/.claude/' },
+                ],
+            },
+        ),
+    ).toThrow(/already-mounted/);
 });
 
 test('buildContainerArgv runs the `image` override (a pinned digest) in place of the resolved image', () => {
