@@ -82,8 +82,12 @@ export function unknownCapabilities(
     return out;
 }
 
-// Built-in capabilities, each enforced via requireCapability() at its chokepoint(s): the CLI
-// adapters in src/tools for git/gh.
+// Built-in capabilities. git-push/gh-pr/gh-comment no longer gate the host-side git/gh CLI adapters:
+// a workflow body runs in-process in the daemon under full trust, so a check there was bypassable
+// (shell out via Bun's `$`) rather than a real boundary. Their teeth are the credential-injection
+// policy below (CAP_ENV) — an exec step gets a git/gh token only if it declares the matching
+// capability. `network` is still enforced via requireCapability(), at the container-dispatch
+// chokepoint (engine.ts), where it gates a non-bypassable network namespace.
 defineCapability('git-push', 'push commits and branches to a git remote');
 defineCapability('gh-pr', 'open GitHub pull requests');
 defineCapability('gh-comment', 'comment on and resolve GitHub PR review threads');
