@@ -4,7 +4,6 @@ export interface WorkflowSummary {
     schedule: { cron: string; overlap?: string } | null;
     /** True when a scheduled workflow's cron firing is paused (POST /workflows/:name/pause). */
     schedulePaused: boolean;
-    capabilities: string[];
     priority: number;
     lastRun: { id: string; status: string; created_at: number; finished_at: number | null } | null;
     counts: Record<string, number>;

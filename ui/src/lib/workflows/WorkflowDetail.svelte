@@ -89,7 +89,7 @@
   {/if}
 </div>
 <div class="subtle">
-  {workflow.capabilities.length ? workflow.capabilities.join(', ') : 'no capabilities'} · priority {workflow.priority}
+  priority {workflow.priority}
 </div>
 
 <div class="panel">
