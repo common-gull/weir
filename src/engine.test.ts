@@ -606,16 +606,31 @@ test('containerStep: spec.network is the sole egress control — dispatch gates 
 const HAS_DOCKER = Bun.which('docker') !== null;
 const dockerTest = HAS_DOCKER ? test : test.skip;
 
+/** Budget for a *cold* container runtime, not the warm one these tests measure. A runtime's first
+ *  invocation on a fresh machine initializes its storage graph (probing overlay support, falling back to
+ *  fuse-overlayfs) and pulls the image over the network — minutes, where every later run is a second —
+ *  and whichever gated test runs first pays all of it. Budgeting for the warm path makes a correct suite
+ *  fail on a fresh CI machine and pass on a rerun; a timeout costs nothing when it isn't hit. */
+const COLD_RUNTIME_MS = 240_000;
+
+/** Pull the gated tests' image once for the whole file, reporting whether it's usable. These tests
+ *  exercise dispatch, pinning, and isolation — not the registry — so a machine that can't produce the
+ *  image (offline) skips them rather than failing the suite. Memoized: only the first caller pays the
+ *  pull, and it's the same image every time. */
+let imagePulled: Promise<boolean> | undefined;
+function ensureImage(): Promise<boolean> {
+    imagePulled ??= $`docker pull busybox:latest`
+        .quiet()
+        .then(() => true)
+        .catch(() => false);
+    return imagePulled;
+}
+
 dockerTest(
     'containerStep: runs a pinned container and records its digest',
     async () => {
-        // A local image with a repo digest to pin against (inspect never pulls). Skip if the pull can't run
-        // (offline) — the point here is dispatch + pinning, not the network.
-        try {
-            await $`docker pull busybox:latest`.quiet();
-        } catch {
-            return;
-        }
+        // A local image with a repo digest to pin against (inspect never pulls).
+        if (!(await ensureImage())) return;
         const deps = await containerDeps();
         // A shell one-liner that speaks the C1 protocol: emit one output frame on stdout (the step needs
         // no input, and runProcess tolerates a child that exits before draining stdin). Absolute
@@ -638,7 +653,7 @@ dockerTest(
         expect(step.kind).toBe('container');
         expect(step.image_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
     },
-    60_000,
+    COLD_RUNTIME_MS,
 );
 
 dockerTest(
@@ -653,7 +668,7 @@ dockerTest(
         const n = db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(id) as { n: number };
         expect(n.n).toBe(0);
     },
-    30_000,
+    COLD_RUNTIME_MS,
 );
 
 dockerTest(
@@ -662,11 +677,7 @@ dockerTest(
         // The success store-commit path for the docker runtime, end-to-end through the engine: the
         // container writes a declared output into its /weir scratch and emits a C1 frame; the engine
         // snapshots that output into the store and records the path -> hash map in the memo.
-        try {
-            await $`docker pull busybox:latest`.quiet();
-        } catch {
-            return;
-        }
+        if (!(await ensureImage())) return;
         const deps = await containerDeps();
         const cmd = [
             '/bin/sh',
@@ -689,7 +700,7 @@ dockerTest(
         const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
         expect(JSON.parse(run.result)).toEqual({ result: { wrote: 'out.txt' }, artifacts: { 'out.txt': hash } });
     },
-    60_000,
+    COLD_RUNTIME_MS,
 );
 
 dockerTest(
@@ -699,11 +710,7 @@ dockerTest(
         // with no frame fails the decode before the store is ever touched — the docker-runtime analogue of
         // the exec path's deferred-commit guarantee. The output is written but the run rejects, so nothing
         // is committed.
-        try {
-            await $`docker pull busybox:latest`.quiet();
-        } catch {
-            return;
-        }
+        if (!(await ensureImage())) return;
         const deps = await containerDeps();
         const cmd = ['/bin/sh', '-c', 'printf wrote-but-rejected > /weir/out.txt; exit 1'];
         defineWorkflow('reject', {}, (ctx) =>
@@ -717,7 +724,7 @@ dockerTest(
         const artifacts = db.query(`SELECT COUNT(*) AS n FROM artifacts`).get() as { n: number };
         expect(artifacts.n).toBe(0);
     },
-    60_000,
+    COLD_RUNTIME_MS,
 );
 
 dockerTest(
@@ -728,11 +735,7 @@ dockerTest(
         // step lists it in its own `env`. Nothing is injected implicitly. The unit halves are covered
         // by env.test.ts (the baseline) and image.test.ts (by-name forwarding keeps values off the argv);
         // this proves the composition end-to-end, inside a real container.
-        try {
-            await $`docker pull busybox:latest`.quiet();
-        } catch {
-            return;
-        }
+        if (!(await ensureImage())) return;
         // The container reports its own view of two daemon-planted vars: GH_TOKEN and WEIR_ENV_SNOOP. A var
         // the baseline doesn't name and the step doesn't pass expands to the empty string.
         const probe = [
@@ -762,7 +765,7 @@ dockerTest(
             expect(JSON.parse(scopedRun.result)).toEqual({ GH_TOKEN: 'gh-secret-xyz', SNOOP: '' });
         });
     },
-    90_000,
+    COLD_RUNTIME_MS,
 );
 
 dockerTest(
@@ -770,11 +773,7 @@ dockerTest(
     async () => {
         // The success-path proof that a container step honors `repeat`: a fresh container runs per
         // iteration (a host-side `while` counter caps it), and each run lands its own step_attempts row.
-        try {
-            await $`docker pull busybox:latest`.quiet();
-        } catch {
-            return;
-        }
+        if (!(await ensureImage())) return;
         const deps = await containerDeps();
         let runs = 0;
         const cmd = ['/bin/sh', '-c', 'printf %s \'{"ok":true,"result":42}\''];
@@ -791,7 +790,7 @@ dockerTest(
         const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
         expect(JSON.parse(run.result)).toBe(42); // the last iteration's result is what memoizes
     },
-    60_000,
+    COLD_RUNTIME_MS,
 );
 
 dockerTest(
@@ -800,11 +799,7 @@ dockerTest(
         // End-to-end through a real container: the module emits a C1 frame, the default decoder returns
         // its result, and the spec's `schema` is asserted on that value at the extract boundary. A passing
         // value flows through; a failing one rejects the step with the validator's issue and commits nothing.
-        try {
-            await $`docker pull busybox:latest`.quiet();
-        } catch {
-            return;
-        }
+        if (!(await ensureImage())) return;
         const positiveN = schema<{ n: number }>((v) => {
             const n = (v as { n?: unknown } | null)?.n;
             return typeof n === 'number' && n > 0
@@ -832,7 +827,7 @@ dockerTest(
         // A schema failure isn't memoized — the step re-runs on retry like any other failure.
         expect((db.query(`SELECT COUNT(*) AS n FROM steps WHERE run_id = ?`).get(bad) as { n: number }).n).toBe(0);
     },
-    60_000,
+    COLD_RUNTIME_MS,
 );
 
 dockerTest(
@@ -841,11 +836,7 @@ dockerTest(
         // End-to-end proof of the explicit model: an author-declared `env` and `mounts` on the spec reach a
         // real container run. The container reports its view of the declared var and reads a file from the
         // declared read-only mount.
-        try {
-            await $`docker pull busybox:latest`.quiet();
-        } catch {
-            return;
-        }
+        if (!(await ensureImage())) return;
         const host = await mkdtemp(join(tmpdir(), 'weir-mount-'));
         tmpDirs.push(host);
         await writeFile(join(host, 'note.txt'), 'mounted-bytes');
@@ -870,5 +861,5 @@ dockerTest(
         const run = db.query(`SELECT result FROM runs WHERE id = ?`).get(id) as { result: string };
         expect(JSON.parse(run.result)).toEqual({ env: 'explicit-value', file: 'mounted-bytes' });
     },
-    90_000,
+    COLD_RUNTIME_MS,
 );
