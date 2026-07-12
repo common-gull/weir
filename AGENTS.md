@@ -116,16 +116,15 @@ A **custom tool** that performs an outward action declares a capability and gate
 ```ts
 import { defineCapability, requireCapability } from '../../src/capabilities.ts';
 
-defineCapability('slack', 'post messages to Slack'); // first-class: known to doctor/list/API
+defineCapability('slack', 'post messages to Slack'); // first-class, not an unvalidated magic string
 export async function slackPost(text: string) {
   requireCapability('slack');                        // gate the outward action
   await fetch(process.env.SLACK_WEBHOOK_URL, { method: 'POST', body: JSON.stringify({ text }) });
 }
 ```
 
-A custom capability works even unregistered (the `Capability` type has a `(string & {})` member),
-but `defineCapability` makes it first-class: validated by `weir doctor`, shown by `weir list`, and
-listed at `GET /api/capabilities`.
+A custom capability works even unregistered (the `Capability` type has a `(string & {})` member);
+`defineCapability` just makes it first-class in the registry instead of an unvalidated magic string.
 
 **Reload caveat:** `weir reload` only cache-busts top-level `workflows/*.ts`. Edits to helpers
 (`workflows/common/`, a workflow's subfolder) or `src/` need a daemon **restart** — Bun caches
