@@ -2,14 +2,11 @@ import { expect, test } from 'bun:test';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveExecEnv, withCapabilities } from '../capabilities.ts';
-import type { Capability } from '../types.ts';
+import { baseExecEnv } from './env.ts';
 import { parseRepoDigest, pinnedImageRef, resolveImageDigest } from './image.ts';
 import { buildContainerArgv, containerImageRef } from './runtime.ts';
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
-const withCaps = <T>(caps: Capability[], fn: () => T): T =>
-    withCapabilities({ workflow: 'wf', caps: new Set(caps) }, fn);
 
 // ---- buildContainerArgv (pure argv assembly) ----
 
@@ -123,26 +120,24 @@ test('containerImageRef returns the named image for the image form and the base 
     expect(containerImageRef({ runtime: 'python', module: '/w/step.py' })).toBe('weir-python');
 });
 
-test('cap-scoped env from resolveExecEnv flows into the docker argv (C7)', () => {
-    const source = { PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' };
-    const env = withCaps(['gh-pr'], () => resolveExecEnv(source));
+test('a step env (baseline plus a named secret) flows into the docker argv by name (C7)', () => {
+    // The container's env is the operational baseline plus whatever the step explicitly names. Everything
+    // in that env is forwarded by name (`-e NAME`), so the value comes from the CLI's own env and the
+    // secret never appears in the argv.
+    const env = { ...baseExecEnv({ PATH: '/usr/bin', UNRELATED: 'x' }), GH_TOKEN: 'ghs_secret' };
     const flat = buildContainerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
-    // gh-pr authorizes GH_TOKEN; PATH is the operational baseline; UNRELATED is neither → withheld.
-    // Forwarded by name, so the secret value never appears in the argv.
     expect(flat).toContain('-e GH_TOKEN');
-    expect(flat).not.toContain('ghs_secret');
-    expect(flat).toContain('-e PATH');
-    expect(flat).not.toContain('UNRELATED');
+    expect(flat).not.toContain('ghs_secret'); // forwarded by name → value off the argv
+    expect(flat).toContain('-e PATH'); // the operational baseline rides along
+    expect(flat).not.toContain('UNRELATED'); // not baseline, not named → withheld
 });
 
-test('a container step declaring no credential capability carries no daemon secret into the argv (C7)', () => {
-    // The negative of the case above and the docker-boundary analog of the rung-1 "secret-free env"
-    // guarantee: with no credential capability, resolveExecEnv withholds the daemon's GH_TOKEN, so it's
-    // never named on the container's argv — neither by `-e NAME` nor by value. Only the operational
-    // baseline (PATH) rides along. Should env-forwarding ever leak a secret regardless of grants, this
-    // fails alongside the capabilities.test.ts gate.
-    const source = { PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' };
-    const env = withCaps([], () => resolveExecEnv(source));
+test('a container step naming no secret carries no daemon secret into the argv (C7)', () => {
+    // The negative of the case above and the docker-boundary analog of the "secret-free env" guarantee:
+    // with only the baseline (no capability injection, no explicitly named secret), the daemon's GH_TOKEN
+    // is never named on the container's argv — neither by `-e NAME` nor by value. Only the operational
+    // baseline (PATH) rides along. Should env-forwarding ever leak a secret unbidden, this fails.
+    const env = baseExecEnv({ PATH: '/usr/bin', GH_TOKEN: 'ghs_secret', UNRELATED: 'x' });
     const flat = buildContainerArgv({ image: 'img' }, { scratch: '/s', env }).join(' ');
     expect(flat).not.toContain('GH_TOKEN');
     expect(flat).not.toContain('ghs_secret');

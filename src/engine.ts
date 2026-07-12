@@ -15,7 +15,8 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DB } from './db.ts';
 import { assertSerializable, emit, fromJson, toJson, tx } from './db.ts';
-import { requireCapability, resolveExecEnv, withCapabilities } from './capabilities.ts';
+import { requireCapability, withCapabilities } from './capabilities.ts';
+import { baseExecEnv } from './exec/env.ts';
 import { pinnedImageRef, resolveImageDigest } from './exec/image.ts';
 import { decodeProcessOutput } from './exec/protocol.ts';
 import {
@@ -440,7 +441,7 @@ function buildCtx(
     // here, so every retry/repeat attempt runs that one digest — the memo's replay
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
-    // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) — used as the runtime
+    // snapshotted back), the env is the operational baseline (baseExecEnv) — used as the runtime
     // CLI's own env and forwarded into the container by name — while the spec's own `env` rides in as
     // inline `-e NAME=VALUE` so it can never reach that CLI env, and the spec's `mounts` (gated on the
     // `container-mount` capability in dispatch, a mount reusing a weir-supplied path refused) ride along.
@@ -466,14 +467,15 @@ function buildCtx(
             String(seq),
             String(attempt),
         );
-        // The runtime CLI's own process environment is the capability-scoped resolveExecEnv (#C7) ONLY —
-        // never the spec's env. It doubles as the source for the container's `-e NAME` name-only forwards,
-        // so each such name resolves to a value the CLI actually holds (and secret values stay off the host
-        // process table). Keeping spec.env out of it is the isolation boundary: a spec.env name the CLI
-        // itself reads (DOCKER_HOST/DOCKER_CONFIG/DOCKER_CONTEXT/DOCKER_TLS_VERIFY/PATH/…) would otherwise
-        // repoint the daemon's runtime spawn or its connection at an attacker-controlled target. The spec's
-        // env instead rides into the container as inline `-e NAME=VALUE` (buildContainerArgv).
-        const env = resolveExecEnv();
+        // The runtime CLI's own process environment is the operational baseline (baseExecEnv) ONLY — never
+        // the spec's env. It doubles as the source for the container's `-e NAME` name-only forwards, so each
+        // such name resolves to a value the CLI actually holds (and secret values stay off the host process
+        // table). Keeping spec.env out of it is the isolation boundary: a spec.env name the CLI itself reads
+        // (DOCKER_HOST/DOCKER_CONFIG/DOCKER_CONTEXT/DOCKER_TLS_VERIFY/PATH/…) would otherwise repoint the
+        // daemon's runtime spawn or its connection at an attacker-controlled target. The spec's env instead
+        // rides into the container as inline `-e NAME=VALUE` (buildContainerArgv), so the container's
+        // effective env is the baseline plus whatever the step explicitly names — nothing by capability.
+        const env = baseExecEnv();
         try {
             await mkdir(scratch, { recursive: true });
             await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
