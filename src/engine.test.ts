@@ -520,10 +520,10 @@ void _schemaNarrowsReturnType;
 
 /** A stand-in container runtime that needs no docker daemon: its `image inspect` branch emits a
  *  RepoDigests array so the step pins, and its `run` branch records the argv it was invoked with (each
- *  as an `ARGV\t…` line) plus the value of the forwarded `$FOO` env — proving the value reached the
- *  CLI's own environment rather than only the argv — then emits a C1 output frame so the step completes.
- *  The capture path is baked into the script because runProcess replaces the child's env, leaving no
- *  channel to pass it in. */
+ *  as an `ARGV\t…` line) plus the values of the forwarded `$FOO` and `$PATH` env — proving what reached
+ *  the CLI's own environment rather than only the argv — then emits a C1 output frame so the step
+ *  completes. The capture path is baked into the script because runProcess replaces the child's env,
+ *  leaving no channel to pass it in. */
 async function fakeRuntime(dir: string, capture: string): Promise<string> {
     const bin = join(dir, 'fake-runtime');
     const digest = `sha256:${'a'.repeat(64)}`;
@@ -531,7 +531,7 @@ async function fakeRuntime(dir: string, capture: string): Promise<string> {
         bin,
         `#!/bin/sh
 if [ "$1" = image ]; then echo '["repo@${digest}"]'; exit 0; fi
-{ printf 'ARGV\\t%s\\n' "$@"; printf 'ENV_FOO\\t%s\\n' "$FOO"; } > '${capture}'
+{ printf 'ARGV\\t%s\\n' "$@"; printf 'ENV_FOO\\t%s\\n' "$FOO"; printf 'ENV_PATH\\t%s\\n' "$PATH"; } > '${capture}'
 printf '%s' '{"ok":true,"result":{"ran":true}}'
 `,
     );
@@ -568,6 +568,29 @@ test('containerStep: forwards spec-declared env and mounts into the container ru
     expect(argv.some((a) => a.includes('bar-value'))).toBe(false);
     // …and its value reaches the runtime CLI's own environment, so the name-only flag resolves.
     expect(envFoo).toBe('bar-value');
+});
+
+test('containerStep: spec-declared env cannot override the capability/baseline env (PATH)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'weir-runtime-'));
+    tmpDirs.push(dir);
+    const capture = join(dir, 'capture.txt');
+    const deps: RunDeps = { ...(await containerDeps()), containerRuntime: await fakeRuntime(dir, capture) };
+
+    // A step that tries to set PATH must not win: that env is also the daemon's own for the runtime CLI,
+    // so an override would repoint the daemon's bare-name spawn of the container runtime to an
+    // attacker-planted binary. resolveExecEnv's PATH (the daemon's) stays authoritative.
+    defineWorkflow('envclash', {}, (ctx) =>
+        ctx.containerStep('go', { image: 'repo:tag', env: { PATH: '/attacker/dir' } }),
+    );
+    const id = createRun(db, 'envclash');
+    expect(await executeRun(db, id, deps)).toBe('completed');
+
+    const envPath = (await readFile(capture, 'utf8'))
+        .split('\n')
+        .find((l) => l.startsWith('ENV_PATH\t'))
+        ?.slice('ENV_PATH\t'.length);
+    expect(envPath).not.toBe('/attacker/dir');
+    expect(envPath).toBe(process.env.PATH);
 });
 
 // ---- real-docker (gated: skipped when the daemon is absent, so CI stays green) ----

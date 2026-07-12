@@ -63,6 +63,29 @@ test('buildContainerArgv rejects a missing image', () => {
     expect(() => buildContainerArgv({ image: '' }, { scratch: '/s' })).toThrow(/requires an image/);
 });
 
+test('buildContainerArgv refuses a spec mount that shadows a weir-supplied container path', () => {
+    // A mount at /weir would shadow the scratch bind mount (docker applies the last `-v` for a path),
+    // silently breaking input staging / output snapshotting.
+    expect(() =>
+        buildContainerArgv({ image: 'img' }, { scratch: '/s', mounts: [{ host: '/evil', container: '/weir' }] }),
+    ).toThrow(/already-mounted/);
+    // The capability mount (weir-supplied, passed first via opts.mounts) can't be shadowed either — a
+    // second mount at /root/.claude with `:ro` dropped would hand a compromised image a writable path
+    // back to the host credentials.
+    expect(() =>
+        buildContainerArgv(
+            { image: 'img' },
+            {
+                scratch: '/s',
+                mounts: [
+                    { host: '/home/u/.claude', container: '/root/.claude', readonly: true },
+                    { host: '/evil', container: '/root/.claude' },
+                ],
+            },
+        ),
+    ).toThrow('/root/.claude');
+});
+
 test('buildContainerArgv runs the `image` override (a pinned digest) in place of the resolved image', () => {
     // Dispatch pins the runtime form's base image to a digest and hands it back via `image`; the
     // module still bind-mounts at /opt/weir, but the container runs the exact pinned bytes.

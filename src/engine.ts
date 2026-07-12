@@ -442,8 +442,9 @@ function buildCtx(
     // identity — rather than re-resolving (and possibly re-pinning) per attempt. A per-ATTEMPT scratch
     // dir is ALWAYS created and bind-mounted at /weir (any declared inputs staged in, declared outputs
     // snapshotted back), the env is the capability-scoped resolveExecEnv (#C7) merged with the spec's
-    // explicit `env` — forwarded by name and used as the docker CLI's own env — and the ambient
-    // capability mounts (containerCapabilityMounts) plus the spec's explicit `mounts` ride along. Keying
+    // explicit `env` (the capability env authoritative on a clash) — forwarded by name and used as the
+    // docker CLI's own env — and the ambient capability mounts (containerCapabilityMounts) plus the
+    // spec's explicit `mounts` ride along (a mount reusing a weir-supplied path is refused). Keying
     // the scratch dir by `attempt` keeps an abandoned (timed-out) attempt's async teardown from racing a
     // retry that stages inputs into the same path; it is torn down once outputs are stored. Invoked as
     // the attempt thunk of `runStepBody`, so it runs once per retry/repeat iteration and takes that
@@ -466,9 +467,12 @@ function buildCtx(
         );
         // One resolved env for both the `-e NAME` flags and the docker CLI's own environment, so each
         // forwarded name resolves to a value the CLI actually holds (never onto the host process table).
-        // The spec's explicit `env` is merged over the capability-derived one (resolveExecEnv, #C7) so an
-        // author-declared var rides alongside the capability path and wins on a name clash.
-        const env = { ...resolveExecEnv(), ...spec.env };
+        // The spec's explicit `env` is additive to the capability-derived one (resolveExecEnv, #C7), but
+        // that env stays authoritative on a name clash: it is *also* the runtime CLI's own environment,
+        // so a step that could override PATH (or any operational/credential var resolveExecEnv controls)
+        // would repoint the daemon's bare-name spawn of the container runtime to an attacker-planted
+        // binary. Spreading resolveExecEnv last means spec.env only contributes names it doesn't cover.
+        const env = { ...spec.env, ...resolveExecEnv() };
         try {
             await mkdir(scratch, { recursive: true });
             await stageInputs(db, storeDir, scratch, spec.inputs ?? []);
