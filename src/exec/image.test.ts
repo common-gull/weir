@@ -214,8 +214,14 @@ test('resolveImageDigest invokes the given runtime binary as argv[0] and parses 
 const HAS_DOCKER = Bun.which('docker') !== null;
 const dockerTest = HAS_DOCKER ? test : test.skip;
 
-dockerTest('resolveImageDigest rejects an image with no local repo digest', async () => {
-    // A ref that isn't present locally has nothing to inspect — the real `docker image inspect` exits
-    // non-zero, so resolution rejects rather than fabricating a digest. inspect never pulls: no network.
-    await expect(resolveImageDigest('weir-does-not-exist:none-xyz-000')).rejects.toThrow();
-});
+dockerTest(
+    'resolveImageDigest rejects an image with no local repo digest',
+    async () => {
+        // A ref that isn't present locally has nothing to inspect — the real `docker image inspect` exits
+        // non-zero, so resolution rejects rather than fabricating a digest. inspect never pulls: no network.
+        await expect(resolveImageDigest('weir-does-not-exist:none-xyz-000')).rejects.toThrow();
+    },
+    // The default budget assumes a warm runtime. This may be the first command to touch it on a fresh
+    // machine, and a runtime initializing its storage graph takes far longer to answer than to say no.
+    120_000,
+);
